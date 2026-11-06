@@ -1,0 +1,6 @@
+{
+  "name": "RFID Attendance Management Portal",
+  "description": "Production-ready RFID Attendance Management Portal with real-time Firebase Realtime Database sync, ESP32 integration, live attendance tracking, student management, and Excel/CSV reports.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

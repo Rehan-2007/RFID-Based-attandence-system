@@ -1,0 +1,60 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper function: check if authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Helper function: check if user is admin
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.uid == 'bi3c890VUXhVE0JFxroYfnlQwea2' ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')
+      );
+    }
+
+    // Helper function: check if user is accessing their own document
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Users collection rules:
+    // - Administrators can read and manage all user documents
+    // - Students can only read and update their own document
+    // - Students are strictly forbidden from accessing other students' documents
+    match /users/{userId} {
+      allow read: if isAdmin() || isOwner(userId);
+      allow create, update: if isAdmin() || (isOwner(userId) && request.resource.data.role == 'student');
+      allow delete: if isAdmin();
+    }
+
+    // Students registry:
+    // - Administrators can manage all registered students
+    // - Students can only read their own linked student profile
+    match /students/{studentId} {
+      allow read: if isAdmin() || (
+        isAuthenticated() && (
+          resource.data.authUid == request.auth.uid ||
+          resource.data.email == request.auth.token.email
+        )
+      );
+      allow write: if isAdmin();
+    }
+
+    // Attendance records:
+    // - Administrators can read and manage all attendance records
+    // - Students can only read their own verified attendance entries
+    match /attendance/{recordId} {
+      allow read: if isAdmin() || (
+        isAuthenticated() && (
+          resource.data.authUid == request.auth.uid ||
+          (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+           get(/databases/$(database)/documents/users/$(request.auth.uid)).data.rfidUID == resource.data.rfidUID)
+        )
+      );
+      allow write: if isAdmin();
+    }
+  }
+}

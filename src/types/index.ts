@@ -1,14 +1,67 @@
+export type UserRole = 'admin' | 'student';
+
+export type AuthStatus = 
+  | 'initializing'
+  | 'authenticating'
+  | 'loading_profile'
+  | 'authenticated'
+  | 'unauthenticated'
+  | 'error';
+
 export interface Student {
   uid: string; // RFID UID (e.g., '5AA5AB24')
   name: string;
-  studentId: string; // (e.g., 'STU-2024-001')
+  studentId: string; // Roll Number (e.g., 'STU-2024-001')
   department: string;
   year: string;
+  semester?: string;
   email: string;
   phone: string;
   registeredAt: string;
   avatar?: string;
   status: 'active' | 'inactive';
+  authUid?: string; // Associated Firebase Auth UID
+}
+
+export interface UserProfile {
+  uid: string; // Firebase Auth UID
+  name: string;
+  email: string;
+  rollNumber: string;
+  department: string;
+  year: string;
+  semester: string;
+  role: UserRole;
+  rfidUID: string;
+  createdAt: string | number;
+  phone?: string;
+}
+
+export interface AppUser {
+  uid: string;
+  email: string | null;
+  displayName: string;
+  role: UserRole;
+  rfidUID?: string;
+  studentId?: string;
+  rollNumber?: string;
+  department?: string;
+  year?: string;
+  semester?: string;
+  phone?: string;
+  provider: 'firebase';
+}
+
+export interface StudentRegistrationInput {
+  name: string;
+  rollNumber: string;
+  email: string;
+  password?: string;
+  department: string;
+  year: string;
+  semester: string;
+  rfidUID: string;
+  phone?: string;
 }
 
 export interface AttendanceRecord {
@@ -83,4 +136,3 @@ export interface ResetAuditLog {
   timestampStr: string;
   description?: string;
 }
-

@@ -1,0 +1,77 @@
+{
+  "entities": {
+    "User": {
+      "properties": {
+        "email": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "rollNumber": {
+          "type": "string"
+        },
+        "department": {
+          "type": "string"
+        },
+        "year": {
+          "type": "string"
+        },
+        "semester": {
+          "type": "string"
+        },
+        "rfidUID": {
+          "type": "string"
+        },
+        "phone": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "number"
+        }
+      },
+      "required": ["email", "role"]
+    },
+    "Student": {
+      "properties": {
+        "uid": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "studentId": {
+          "type": "string"
+        },
+        "department": {
+          "type": "string"
+        },
+        "year": {
+          "type": "string"
+        },
+        "semester": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string"
+        },
+        "phone": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "authUid": {
+          "type": "string"
+        }
+      },
+      "required": ["uid", "name", "studentId"]
+    }
+  },
+  "firestore": {
+    "rules": "rules_version = '2';\nservice cloud.firestore {\n  match /databases/{database}/documents {\n    function isAuthenticated() {\n      return request.auth != null;\n    }\n    function isAdmin() {\n      return isAuthenticated() && (\n        request.auth.uid == 'bi3c890VUXhVE0JFxroYfnlQwea2' ||\n        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&\n         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')\n      );\n    }\n    function isOwner(userId) {\n      return isAuthenticated() && request.auth.uid == userId;\n    }\n    match /users/{userId} {\n      allow read: if isAdmin() || isOwner(userId);\n      allow create, update: if isAdmin() || (isOwner(userId) && request.resource.data.role == 'student');\n      allow delete: if isAdmin();\n    }\n    match /students/{studentId} {\n      allow read: if isAdmin() || (\n        isAuthenticated() && (\n          resource.data.authUid == request.auth.uid ||\n          resource.data.email == request.auth.token.email\n        )\n      );\n      allow write: if isAdmin();\n    }\n    match /attendance/{recordId} {\n      allow read: if isAdmin() || (\n        isAuthenticated() && (\n          resource.data.authUid == request.auth.uid ||\n          (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&\n           get(/databases/$(database)/documents/users/$(request.auth.uid)).data.rfidUID == resource.data.rfidUID)\n        )\n      );\n      allow write: if isAdmin();\n    }\n  }\n}"
+  }
+}

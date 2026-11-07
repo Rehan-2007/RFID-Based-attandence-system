@@ -5,12 +5,16 @@ import {
   DayStats, 
   StudentAttendanceSummary,
   DeviceCommand,
-  ResetAuditLog
+  ResetAuditLog,
+  StudentRegistrationInput
 } from '../types';
 import { 
   subscribeToStudents, 
   subscribeToDateAttendance, 
   subscribeToAllAttendance, 
+  subscribeToStudentAttendance,
+  subscribeToStudentTodayAttendance,
+  linkExistingStudentProfilesInFirestore,
   subscribeToConnectionStatus,
   subscribeToDeviceCommands,
   subscribeToLastReset,
@@ -20,6 +24,7 @@ import {
   seedInitialStudentsIfEmpty,
   resetAttendanceData,
   completeSystemReset,
+  registerStudentAccount,
   INITIAL_STUDENTS,
   CONFIGURED_ADMIN_UID
 } from '../services/firebase';
@@ -60,6 +65,7 @@ interface AttendanceContextType {
   
   // Actions
   addOrUpdateStudent: (student: Student) => Promise<void>;
+  createStudentAccount: (input: StudentRegistrationInput) => Promise<{ authUid: string; student: Student }>;
   deleteStudent: (uid: string) => Promise<void>;
   scanRfidCard: (uid: string, device?: string) => Promise<{ success: boolean; message: string; record?: AttendanceRecord }>;
   seedDefaultStudents: () => Promise<void>;
@@ -98,10 +104,10 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
 
   const todayStr = useMemo(() => new Date().toISOString().split('T')[0], []);
 
-  // Listen to actual Firebase Realtime Database ONLY after verified Admin authentication
+  // Listen to actual Firebase Realtime Database for Authenticated Admin or Student
   useEffect(() => {
-    // 1. Guard: Never query /students or attendance unauthenticated or with non-admin UID
-    if (!user || user.uid !== CONFIGURED_ADMIN_UID) {
+    // 1. Guard: Never query unauthenticated
+    if (!user) {
       setStudents({});
       setTodayAttendance({});
       setAllAttendance({});
@@ -116,96 +122,134 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
 
     // 2. Genuine Firebase connection state listener via .info/connected
     const unsubscribeConn = subscribeToConnectionStatus((connected) => {
-      // Show connected only if the socket is connected and no database read permission error is active
       setIsDbConnected(connected && !dbErrorMessage);
     });
 
-    // 3. Device Commands listener for ESP32 acknowledgement
-    const unsubscribeCmd = subscribeToDeviceCommands((cmd) => {
-      setLatestDeviceCommand(cmd);
-    });
-
-    // 4. Last Reset Audit Log listener
-    const unsubscribeReset = subscribeToLastReset((log) => {
-      setLastResetLog(log);
-    });
-
+    let unsubscribeCmd = () => {};
+    let unsubscribeReset = () => {};
     let unsubscribeStudents = () => {};
     let unsubscribeToday = () => {};
     let unsubscribeAll = () => {};
 
-    try {
-      // 5. Real-time subscription to Firebase 'students' node (Admin UID verified)
-      unsubscribeStudents = subscribeToStudents(
-        (data) => {
-          setDbErrorMessage(null);
-          setIsDbConnected(true);
-          if (data && Object.keys(data).length > 0) {
-            setStudents(data);
-          } else {
-            // Seed the 3 required students if database students node is currently empty
-            seedInitialStudentsIfEmpty().then(() => {
-              const map: Record<string, Student> = {};
-              INITIAL_STUDENTS.forEach((st) => {
-                map[st.uid] = st;
+    if (user.role === 'admin') {
+      // Admin: Listen to device commands & reset logs
+      unsubscribeCmd = subscribeToDeviceCommands((cmd) => {
+        setLatestDeviceCommand(cmd);
+      });
+
+      unsubscribeReset = subscribeToLastReset((log) => {
+        setLastResetLog(log);
+      });
+
+      try {
+        // Admin: Real-time subscription to 'students' node
+        unsubscribeStudents = subscribeToStudents(
+          (data) => {
+            setDbErrorMessage(null);
+            setIsDbConnected(true);
+            if (data && Object.keys(data).length > 0) {
+              setStudents(data);
+            } else {
+              seedInitialStudentsIfEmpty().then(() => {
+                const map: Record<string, Student> = {};
+                INITIAL_STUDENTS.forEach((st) => {
+                  map[st.uid] = st;
+                });
+                setStudents(map);
               });
-              setStudents(map);
-            });
+            }
+            setIsLoading(false);
+          },
+          (error) => {
+            console.warn('Realtime Database students listener error:', error);
+            const errMsg = error.message || 'Error connecting to /students node';
+            setDbErrorMessage(errMsg);
+            setIsDbConnected(false);
+            setIsLoading(false);
           }
-          setIsLoading(false);
-        },
-        (error) => {
-          console.warn('Realtime Database students listener error:', error);
-          const errMsg = error.message || 'Error connecting to /students node';
-          setDbErrorMessage(errMsg);
-          setIsDbConnected(false); // Never show misleading Connected status on permission denial
-          setIsLoading(false);
+        );
+      } catch (e: any) {
+        console.warn('Students listener error:', e);
+      }
 
-          // If token expired or permission error, attempt automatic refresh and retry
-          if (errMsg.toLowerCase().includes('permission_denied') || errMsg.toLowerCase().includes('permission denied')) {
-            console.warn('Permission denied at /students. Attempting token refresh...');
-            refreshToken().then((refreshed) => {
-              if (refreshed) {
-                console.log('Token refreshed after permission denial.');
+      try {
+        // Admin: Subscribe to today's attendance
+        unsubscribeToday = subscribeToDateAttendance(
+          todayStr,
+          (data) => {
+            setTodayAttendance(data || {});
+            setIsLoading(false);
+          },
+          (error) => {
+            console.warn('Realtime Database today attendance notice:', error);
+          }
+        );
+
+        // Admin: Subscribe to all attendance records
+        unsubscribeAll = subscribeToAllAttendance(
+          (data) => {
+            setAllAttendance(data || {});
+            setIsLoading(false);
+          },
+          (error) => {
+            console.warn('Realtime Database all attendance notice:', error);
+          }
+        );
+      } catch (e: any) {
+        console.warn('Attendance subscription error:', e);
+        setIsLoading(false);
+      }
+    } else if (user.role === 'student' && user.rfidUID) {
+      const studentRfid = user.rfidUID.trim().toUpperCase();
+
+      // Student: Setup self student record only (no other students accessible)
+      setStudents({
+        [studentRfid]: {
+          uid: studentRfid,
+          name: user.displayName,
+          studentId: user.studentId || '',
+          department: user.department || 'General',
+          year: user.year || '1st Year',
+          semester: user.semester || '',
+          email: user.email || '',
+          phone: user.phone || '',
+          registeredAt: new Date().toISOString(),
+          status: 'active',
+          authUid: user.uid,
+        }
+      });
+
+      try {
+        // Student: Subscribe strictly to their own today's attendance
+        unsubscribeToday = subscribeToStudentTodayAttendance(
+          todayStr,
+          studentRfid,
+          (record) => {
+            setTodayAttendance(record ? { [studentRfid]: record } : {});
+            setIsLoading(false);
+          }
+        );
+
+        // Student: Subscribe strictly to their own historical attendance records
+        unsubscribeAll = subscribeToStudentAttendance(
+          studentRfid,
+          (records) => {
+            const personalAttendanceMap: Record<string, Record<string, AttendanceRecord>> = {};
+            records.forEach((r) => {
+              const dateKey = r.date;
+              if (!personalAttendanceMap[dateKey]) {
+                personalAttendanceMap[dateKey] = {};
               }
+              personalAttendanceMap[dateKey][studentRfid] = r;
             });
+            setAllAttendance(personalAttendanceMap);
+            setIsLoading(false);
           }
-        }
-      );
-
-      // 6. Real-time subscription to today's attendance node (attendance/YYYY-MM-DD)
-      unsubscribeToday = subscribeToDateAttendance(
-        todayStr,
-        (data) => {
-          setTodayAttendance(data || {});
-        },
-        (error) => {
-          console.warn('Realtime Database today attendance listener notice:', error);
-          if (error.message?.toLowerCase().includes('permission_denied')) {
-            setIsDbConnected(false);
-            setDbErrorMessage(error.message);
-          }
-        }
-      );
-
-      // 7. Real-time subscription to all attendance records (attendance/)
-      unsubscribeAll = subscribeToAllAttendance(
-        (data) => {
-          setAllAttendance(data || {});
-        },
-        (error) => {
-          console.warn('Realtime Database all attendance listener notice:', error);
-          if (error.message?.toLowerCase().includes('permission_denied')) {
-            setIsDbConnected(false);
-            setDbErrorMessage(error.message);
-          }
-        }
-      );
-    } catch (e: any) {
-      console.warn('Firebase listeners initialization error:', e);
-      setDbErrorMessage(e?.message || 'Failed to initialize Firebase Realtime Database listeners');
-      setIsDbConnected(false);
-      setIsLoading(false);
+        );
+      } catch (e: any) {
+        console.warn('Student attendance subscription error:', e);
+        setIsLoading(false);
+      }
     }
 
     return () => {
@@ -217,6 +261,13 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       unsubscribeAll();
     };
   }, [user, todayStr, refreshToken, retryTrigger]);
+
+  // Initial effect: link student accounts into Firestore users collection
+  useEffect(() => {
+    linkExistingStudentProfilesInFirestore().catch((err) => {
+      console.warn('Background Firestore profile linking notice:', err);
+    });
+  }, []);
 
   // Students list derived strictly from students state
   const studentsList = useMemo(() => {
@@ -344,6 +395,15 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       console.warn('Realtime database write error:', e);
       setDbErrorMessage(e?.message || 'Failed to save student to Firebase');
     }
+  }, []);
+
+  const createStudentAccount = useCallback(async (input: StudentRegistrationInput) => {
+    const res = await registerStudentAccount(input);
+    setStudents((prev) => ({
+      ...prev,
+      [res.student.uid]: res.student,
+    }));
+    return res;
   }, []);
 
   const deleteStudent = useCallback(async (uid: string) => {
@@ -507,6 +567,7 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         lastResetLog,
         latestDeviceCommand,
         addOrUpdateStudent,
+        createStudentAccount,
         deleteStudent,
         scanRfidCard,
         seedDefaultStudents,

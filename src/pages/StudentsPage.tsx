@@ -29,6 +29,7 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
   const { 
     studentsList, 
     addOrUpdateStudent, 
+    createStudentAccount,
     deleteStudent, 
     seedDefaultStudents,
     todayAttendance,
@@ -43,17 +44,21 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingStudent, setEditingStudent] = useState<Student | null>(null);
   const [studentToDelete, setStudentToDelete] = useState<Student | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
 
   // Form states
-  const [formData, setFormData] = useState<Partial<Student>>({
+  const [formData, setFormData] = useState<Partial<Student & { password?: string; createAuthAccount?: boolean }>>({
     uid: '',
     name: '',
     studentId: '',
     department: 'Computer Science & Engineering',
-    year: 'Final Year',
+    year: '1st Year',
+    semester: 'Semester 1',
     email: '',
     phone: '',
     status: 'active',
+    password: '',
+    createAuthAccount: true,
   });
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -89,10 +94,13 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
       name: '',
       studentId: `STU-2024-00${studentsList.length + 1}`,
       department: 'Computer Science & Engineering',
-      year: 'Final Year',
+      year: '1st Year',
+      semester: 'Semester 1',
       email: '',
       phone: '',
       status: 'active',
+      password: '',
+      createAuthAccount: true,
     });
     setFormError(null);
     setIsModalOpen(true);
@@ -100,7 +108,12 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
 
   const handleOpenEdit = (student: Student) => {
     setEditingStudent(student);
-    setFormData({ ...student });
+    setFormData({ 
+      ...student, 
+      semester: student.semester || 'Semester 1',
+      createAuthAccount: false,
+      password: '',
+    });
     setFormError(null);
     setIsModalOpen(true);
   };
@@ -112,6 +125,8 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
     const uid = formData.uid?.trim().toUpperCase();
     const name = formData.name?.trim();
     const studentId = formData.studentId?.trim();
+    const email = formData.email?.trim() || '';
+    const password = formData.password?.trim() || '';
 
     if (!uid || !name || !studentId) {
       setFormError('Please fill in RFID UID, Student Name, and Student ID.');
@@ -124,20 +139,63 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
       return;
     }
 
+    // If creating a Firebase Auth portal account
+    if (!editingStudent && formData.createAuthAccount) {
+      if (!email) {
+        setFormError('An email address is required to create a Student Portal login account.');
+        return;
+      }
+      if (!password || password.length < 6) {
+        setFormError('Initial student password must be at least 6 characters.');
+        return;
+      }
+
+      setIsSaving(true);
+      try {
+        await createStudentAccount({
+          name,
+          rollNumber: studentId,
+          email,
+          password,
+          department: formData.department || 'Computer Science & Engineering',
+          year: formData.year || '1st Year',
+          semester: formData.semester || 'Semester 1',
+          rfidUID: uid,
+          phone: formData.phone || '',
+        });
+        setIsSaving(false);
+        setIsModalOpen(false);
+        return;
+      } catch (err: any) {
+        setIsSaving(false);
+        setFormError(err.message || 'Failed to create student account.');
+        return;
+      }
+    }
+
     const studentToSave: Student = {
       uid,
       name,
       studentId,
       department: formData.department || 'General',
       year: formData.year || '1st Year',
+      semester: formData.semester || 'Semester 1',
       email: formData.email || '',
       phone: formData.phone || '',
       registeredAt: editingStudent ? editingStudent.registeredAt : new Date().toISOString(),
       status: (formData.status as 'active' | 'inactive') || 'active',
+      authUid: editingStudent?.authUid,
     };
 
-    await addOrUpdateStudent(studentToSave);
-    setIsModalOpen(false);
+    setIsSaving(true);
+    try {
+      await addOrUpdateStudent(studentToSave);
+      setIsSaving(false);
+      setIsModalOpen(false);
+    } catch (err: any) {
+      setIsSaving(false);
+      setFormError(err.message || 'Failed to save student.');
+    }
   };
 
   const handleConfirmDelete = async () => {
@@ -430,8 +488,8 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
                 />
               </div>
 
-              {/* Student ID & Year */}
-              <div className="grid grid-cols-2 gap-3">
+              {/* Student ID & Year & Semester */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1">
                     Student ID *
@@ -447,15 +505,37 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1">
-                    Year / Semester
+                    Academic Year
                   </label>
-                  <input
-                    type="text"
-                    placeholder="e.g. Final Year"
+                  <select
                     value={formData.year}
                     onChange={(e) => setFormData({ ...formData, year: e.target.value })}
                     className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-blue-500"
-                  />
+                  >
+                    <option value="1st Year">1st Year</option>
+                    <option value="2nd Year">2nd Year</option>
+                    <option value="3rd Year">3rd Year</option>
+                    <option value="Final Year">Final Year</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1">
+                    Semester
+                  </label>
+                  <select
+                    value={formData.semester}
+                    onChange={(e) => setFormData({ ...formData, semester: e.target.value })}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-blue-500"
+                  >
+                    <option value="Semester 1">Semester 1</option>
+                    <option value="Semester 2">Semester 2</option>
+                    <option value="Semester 3">Semester 3</option>
+                    <option value="Semester 4">Semester 4</option>
+                    <option value="Semester 5">Semester 5</option>
+                    <option value="Semester 6">Semester 6</option>
+                    <option value="Semester 7">Semester 7</option>
+                    <option value="Semester 8">Semester 8</option>
+                  </select>
                 </div>
               </div>
 
@@ -481,10 +561,11 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1">
-                    Email Address
+                    Email Address {!editingStudent && formData.createAuthAccount ? '*' : ''}
                   </label>
                   <input
                     type="email"
+                    required={!editingStudent && Boolean(formData.createAuthAccount)}
                     placeholder="student@example.com"
                     value={formData.email}
                     onChange={(e) => setFormData({ ...formData, email: e.target.value })}
@@ -505,19 +586,64 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
                 </div>
               </div>
 
+              {/* Create Firebase Auth Portal Account Option (for new students) */}
+              {!editingStudent && (
+                <div className="p-3.5 rounded-2xl bg-slate-900/90 border border-slate-800 space-y-3">
+                  <label className="flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(formData.createAuthAccount)}
+                      onChange={(e) => setFormData({ ...formData, createAuthAccount: e.target.checked })}
+                      className="w-4 h-4 rounded bg-slate-950 border-slate-700 text-emerald-500 focus:ring-emerald-500 cursor-pointer"
+                    />
+                    <span className="text-xs font-semibold text-white">
+                      Create Student Portal Login Account
+                    </span>
+                  </label>
+
+                  {formData.createAuthAccount && (
+                    <div className="space-y-1.5 pt-1 animate-in fade-in">
+                      <label className="block text-[11px] font-semibold text-slate-300 uppercase tracking-wider">
+                        Initial Portal Password *
+                      </label>
+                      <input
+                        type="password"
+                        required={formData.createAuthAccount}
+                        placeholder="Minimum 6 characters"
+                        value={formData.password}
+                        onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                        className="w-full px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs placeholder:text-slate-600 focus:outline-none focus:border-emerald-500"
+                      />
+                      <p className="text-[10px] text-slate-400">
+                        The student will log in to their student portal using their email and this password.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="pt-3 border-t border-slate-800 flex items-center justify-end gap-2.5">
                 <button
                   type="button"
                   onClick={() => setIsModalOpen(false)}
-                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition"
+                  disabled={isSaving}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition shadow-md shadow-blue-600/30"
+                  disabled={isSaving}
+                  className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition shadow-md shadow-blue-600/30 cursor-pointer disabled:opacity-50 flex items-center gap-2"
                 >
-                  {editingStudent ? 'Update Student' : 'Register Student'}
+                  {isSaving ? (
+                    <>
+                      <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                      <span>Saving...</span>
+                    </>
+                  ) : (
+                    <span>{editingStudent ? 'Update Student' : 'Register Student'}</span>
+                  )}
                 </button>
               </div>
             </form>

@@ -5,6 +5,7 @@ import { Sidebar, NavPage } from './components/Sidebar';
 import { Navbar } from './components/Navbar';
 import { RFIDScannerModal } from './components/RFIDScannerModal';
 import { LiveScanToast } from './components/LiveScanToast';
+import { UndoToast } from './components/UndoToast';
 import { LoginPage } from './pages/LoginPage';
 import { 
   Radio, 
@@ -272,6 +273,9 @@ function AdminPortal() {
     <div className="min-h-screen bg-[#090d16] text-slate-100 flex flex-col lg:flex-row antialiased selection:bg-blue-500/30 selection:text-white">
       {/* Toast Notification for Incoming RFID Taps */}
       <LiveScanToast />
+
+      {/* Floating 30-Second Undo Notification for Administrative Actions */}
+      <UndoToast />
 
       {/* Hardware Simulator / RFID Reader Modal */}
       <RFIDScannerModal 

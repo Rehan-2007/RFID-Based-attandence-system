@@ -17,9 +17,23 @@ import {
   Building2
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { lookupStudentInfo } from '../services/firebase';
 
 export const StudentProfilePage: React.FC = () => {
   const { user, changePassword, sendResetEmail, logout } = useAuth();
+
+  const resolved = 
+    lookupStudentInfo(user?.rfidUID || '') || 
+    lookupStudentInfo(user?.studentId || user?.rollNumber || '') || 
+    lookupStudentInfo(user?.uid || '') || 
+    (user?.email ? lookupStudentInfo(user.email) : null) ||
+    (user?.displayName ? lookupStudentInfo(user.displayName) : null);
+
+  const studentName = user?.displayName || resolved?.name || 'Student';
+  const studentRoll = user?.studentId || user?.rollNumber || resolved?.studentId || 'N/A';
+  const studentRfid = user?.rfidUID || resolved?.rfidUID || 'Not Assigned';
+  const studentDept = user?.department || resolved?.department || 'Engineering';
+
 
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -121,27 +135,27 @@ export const StudentProfilePage: React.FC = () => {
           <div className="space-y-3">
             <div className="p-3 rounded-2xl bg-slate-900 border border-slate-800/80">
               <span className="text-[10px] font-mono uppercase text-slate-400 block mb-0.5">Full Name</span>
-              <span className="text-xs font-semibold text-white">{user?.displayName || 'N/A'}</span>
+              <span className="text-xs font-semibold text-white">{studentName}</span>
             </div>
 
             <div className="p-3 rounded-2xl bg-slate-900 border border-slate-800/80">
               <span className="text-[10px] font-mono uppercase text-slate-400 block mb-0.5">Student ID / Roll Number</span>
-              <span className="text-xs font-mono font-bold text-cyan-300">{user?.studentId || 'N/A'}</span>
+              <span className="text-xs font-mono font-bold text-cyan-300">{studentRoll}</span>
             </div>
 
             <div className="p-3 rounded-2xl bg-slate-900 border border-slate-800/80">
               <span className="text-[10px] font-mono uppercase text-slate-400 block mb-0.5">Department</span>
-              <span className="text-xs font-semibold text-slate-200">{user?.department || 'Information Technology'}</span>
+              <span className="text-xs font-semibold text-slate-200">{studentDept}</span>
             </div>
 
             <div className="grid grid-cols-2 gap-3">
               <div className="p-3 rounded-2xl bg-slate-900 border border-slate-800/80">
                 <span className="text-[10px] font-mono uppercase text-slate-400 block mb-0.5">Academic Year</span>
-                <span className="text-xs font-semibold text-slate-200">{user?.year || '1st Year'}</span>
+                <span className="text-xs font-semibold text-slate-200">{user?.year || 'Final Year'}</span>
               </div>
               <div className="p-3 rounded-2xl bg-slate-900 border border-slate-800/80">
                 <span className="text-[10px] font-mono uppercase text-slate-400 block mb-0.5">Semester</span>
-                <span className="text-xs font-semibold text-slate-200">{user?.semester || 'Semester 1'}</span>
+                <span className="text-xs font-semibold text-slate-200">{user?.semester || 'Semester 8'}</span>
               </div>
             </div>
 
@@ -150,7 +164,7 @@ export const StudentProfilePage: React.FC = () => {
               <div className="flex items-center gap-2 mt-0.5">
                 <CreditCard className="w-4 h-4 text-emerald-400" />
                 <span className="text-xs font-mono font-extrabold text-emerald-400">
-                  {user?.rfidUID || 'Not Assigned'}
+                  {studentRfid}
                 </span>
               </div>
             </div>

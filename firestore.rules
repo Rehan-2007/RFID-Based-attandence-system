@@ -50,11 +50,15 @@ service cloud.firestore {
       allow read: if isAdmin() || (
         isAuthenticated() && (
           resource.data.authUid == request.auth.uid ||
+          resource.data.userId == request.auth.uid ||
           (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-           get(/databases/$(database)/documents/users/$(request.auth.uid)).data.rfidUID == resource.data.rfidUID)
+           (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.rfidUID == resource.data.rfidUID ||
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.rfidUID == resource.data.rfidUid ||
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.rfidUID == resource.data.uid))
         )
       );
-      allow write: if isAdmin();
+      allow create, update: if isAdmin() || isAuthenticated();
+      allow delete: if isAdmin();
     }
   }
 }

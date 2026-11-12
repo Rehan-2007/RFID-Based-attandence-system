@@ -16,10 +16,13 @@ import {
   Calendar,
   Filter,
   CheckCircle2,
-  Sparkles
+  Sparkles,
+  UserX,
+  ShieldAlert
 } from 'lucide-react';
 import { Student } from '../types';
 import { useAttendance } from '../context/AttendanceContext';
+import { StudentSuspensionModal } from '../components/StudentSuspensionModal';
 
 interface StudentsPageProps {
   onOpenScanner: () => void;
@@ -44,6 +47,7 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingStudent, setEditingStudent] = useState<Student | null>(null);
   const [studentToDelete, setStudentToDelete] = useState<Student | null>(null);
+  const [suspensionStudent, setSuspensionStudent] = useState<Student | null>(null);
   const [isSaving, setIsSaving] = useState(false);
 
   // Form states
@@ -306,22 +310,35 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
                 filteredStudents.map((st) => {
                   const isPresent = Boolean(todayAttendance[st.uid]);
                   const todayRecord = todayAttendance[st.uid];
+                  const isSuspended = st.status === 'suspended' || Boolean(st.isSuspended);
 
                   return (
                     <tr 
                       key={st.uid}
-                      className="hover:bg-slate-850/50 transition group"
+                      className={`hover:bg-slate-850/50 transition group ${isSuspended ? 'bg-amber-950/15' : ''}`}
                     >
                       {/* Name & ID */}
                       <td className="py-3.5 px-4">
                         <div className="flex items-center gap-3">
-                          <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600/30 to-indigo-600/30 border border-blue-500/30 flex items-center justify-center font-bold text-xs text-blue-300 shrink-0">
+                          <div className={`w-9 h-9 rounded-xl border flex items-center justify-center font-bold text-xs shrink-0 ${
+                            isSuspended 
+                              ? 'bg-amber-500/20 border-amber-500/40 text-amber-300' 
+                              : 'bg-gradient-to-tr from-blue-600/30 to-indigo-600/30 border-blue-500/30 text-blue-300'
+                          }`}>
                             {st.name.charAt(0)}
                           </div>
                           <div>
-                            <p className="font-bold text-slate-100 group-hover:text-blue-300 transition">
-                              {st.name}
-                            </p>
+                            <div className="flex items-center gap-2">
+                              <p className="font-bold text-slate-100 group-hover:text-blue-300 transition">
+                                {st.name}
+                              </p>
+                              {isSuspended && (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-400 font-mono text-[10px] font-bold">
+                                  <ShieldAlert className="w-2.5 h-2.5" />
+                                  <span>SUSPENDED</span>
+                                </span>
+                              )}
+                            </div>
                             <p className="text-[11px] font-mono text-slate-400">
                               {st.studentId}
                             </p>
@@ -370,7 +387,12 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
 
                       {/* Today Status */}
                       <td className="py-3.5 px-4">
-                        {isPresent ? (
+                        {isSuspended ? (
+                          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 font-medium">
+                            <UserX className="w-3 h-3 text-amber-400" />
+                            <span>Suspended ({st.activeSuspension?.duration || 'Active'})</span>
+                          </div>
+                        ) : isPresent ? (
                           <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 font-medium">
                             <CheckCircle2 className="w-3 h-3" />
                             <span>Present ({todayRecord?.time})</span>
@@ -388,10 +410,28 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
                           {/* Quick Simulate Tap */}
                           <button
                             onClick={() => scanRfidCard(st.uid)}
-                            title={`Tap ${st.name}'s card on ESP32`}
-                            className="p-1.5 rounded-lg bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 border border-blue-500/30 transition"
+                            disabled={isSuspended}
+                            title={isSuspended ? 'Student is suspended - attendance blocked' : `Tap ${st.name}'s card on ESP32`}
+                            className={`p-1.5 rounded-lg border transition ${
+                              isSuspended
+                                ? 'bg-slate-900 border-slate-800 text-slate-600 cursor-not-allowed'
+                                : 'bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 border-blue-500/30'
+                            }`}
                           >
                             <Radio className="w-3.5 h-3.5" />
+                          </button>
+
+                          {/* Suspend / Unsuspend */}
+                          <button
+                            onClick={() => setSuspensionStudent(st)}
+                            title={isSuspended ? 'Manage or Unsuspend Student' : 'Suspend Student Account'}
+                            className={`p-1.5 rounded-lg border transition ${
+                              isSuspended
+                                ? 'bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border-amber-500/40'
+                                : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
+                            }`}
+                          >
+                            <UserX className="w-3.5 h-3.5" />
                           </button>
 
                           {/* Edit */}
@@ -672,19 +712,28 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
             <div className="mt-6 flex items-center justify-end gap-2.5">
               <button
                 onClick={() => setStudentToDelete(null)}
-                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition"
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 onClick={handleConfirmDelete}
-                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold transition shadow-md shadow-rose-600/30"
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold transition shadow-md shadow-rose-600/30 cursor-pointer"
               >
                 Delete Student
               </button>
             </div>
           </div>
         </div>
+      )}
+
+      {/* Student Suspension Modal */}
+      {suspensionStudent && (
+        <StudentSuspensionModal
+          isOpen={Boolean(suspensionStudent)}
+          onClose={() => setSuspensionStudent(null)}
+          student={suspensionStudent}
+        />
       )}
     </div>
   );

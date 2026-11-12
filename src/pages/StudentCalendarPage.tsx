@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useAttendance } from '../context/AttendanceContext';
+import { lookupStudentInfo } from '../services/firebase';
 
 export const StudentCalendarPage: React.FC = () => {
   const { user } = useAuth();
@@ -20,7 +21,18 @@ export const StudentCalendarPage: React.FC = () => {
   const [currentDate, setCurrentDate] = useState(() => new Date());
   const [selectedDayStr, setSelectedDayStr] = useState<string | null>(null);
 
-  const studentRfid = user?.rfidUID;
+  const resolvedInfo = useMemo(() => {
+    return (
+      lookupStudentInfo(user?.rfidUID || '') ||
+      lookupStudentInfo(user?.studentId || user?.rollNumber || '') ||
+      lookupStudentInfo(user?.uid || '') ||
+      (user?.email ? lookupStudentInfo(user.email) : null)
+    );
+  }, [user]);
+
+  const studentRfid = useMemo(() => {
+    return (user?.rfidUID || resolvedInfo?.rfidUID || '').trim().toUpperCase();
+  }, [user?.rfidUID, resolvedInfo]);
 
   const year = currentDate.getFullYear();
   const month = currentDate.getMonth(); // 0-indexed
@@ -58,20 +70,48 @@ export const StudentCalendarPage: React.FC = () => {
     let time = '--:--:--';
     let device = 'ESP32-RFID-01';
 
-    if (studentRfid) {
-      if (allAttendance[dStr] && allAttendance[dStr][studentRfid]) {
-        const rec = allAttendance[dStr][studentRfid];
-        if (rec.status === 'Present') {
+    const studentAuthUid = user?.uid;
+    const studentRoll = user?.studentId || user?.rollNumber || resolvedInfo?.studentId;
+    const isMatchingStudent = (item: any): boolean => {
+      if (!item) return false;
+      const itemRfid = (item.rfidUID || item.uid || item.studentRfid || '')?.toString().trim().toUpperCase();
+      if (studentRfid && itemRfid && itemRfid === studentRfid) return true;
+      if (studentAuthUid && (item.authUid === studentAuthUid || item.userId === studentAuthUid)) return true;
+      const itemRoll = (item.studentId || item.rollNumber || '')?.toString().trim().toUpperCase();
+      if (studentRoll && itemRoll && itemRoll === studentRoll.trim().toUpperCase()) return true;
+      return false;
+    };
+
+    if (allAttendance[dStr]) {
+      const candidates = [
+        studentRfid ? allAttendance[dStr][studentRfid] : undefined,
+        studentRfid ? allAttendance[dStr][studentRfid.toLowerCase()] : undefined,
+        studentAuthUid ? allAttendance[dStr][studentAuthUid] : undefined,
+        ...Object.values(allAttendance[dStr]),
+      ];
+      for (const rec of candidates) {
+        if (rec && isMatchingStudent(rec) && rec.status === 'Present') {
           isPresent = true;
           time = rec.time || '--:--:--';
           device = rec.device || device;
+          break;
         }
-      } else if (isToday && todayAttendance[studentRfid]) {
-        const rec = todayAttendance[studentRfid];
-        if (rec.status === 'Present') {
+      }
+    }
+
+    if (!isPresent && isToday) {
+      const todayCandidates = [
+        studentRfid ? todayAttendance[studentRfid] : undefined,
+        studentRfid ? todayAttendance[studentRfid.toLowerCase()] : undefined,
+        studentAuthUid ? todayAttendance[studentAuthUid] : undefined,
+        ...Object.values(todayAttendance),
+      ];
+      for (const rec of todayCandidates) {
+        if (rec && isMatchingStudent(rec) && rec.status === 'Present') {
           isPresent = true;
           time = rec.time || '--:--:--';
           device = rec.device || device;
+          break;
         }
       }
     }

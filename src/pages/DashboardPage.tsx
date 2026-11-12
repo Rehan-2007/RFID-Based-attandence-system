@@ -413,9 +413,9 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate, onOpen
                 </p>
               </div>
             ) : (
-              todayRecordsList.map((record) => (
+              todayRecordsList.map((record, idx) => (
                 <div
-                  key={`${record.date}-${record.uid}`}
+                  key={`${record.date}-${record.uid}-${idx}`}
                   className="p-3 rounded-xl bg-slate-900/80 border border-slate-800/80 hover:border-slate-700 transition flex items-center justify-between"
                 >
                   <div className="flex items-center gap-3 min-w-0">

@@ -8,26 +8,69 @@ import {
   Calendar, 
   Cpu, 
   RotateCcw,
-  CreditCard
+  CreditCard,
+  AlertCircle,
+  X,
+  ShieldAlert,
+  Ban
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useAttendance } from '../context/AttendanceContext';
+import { lookupStudentInfo } from '../services/firebase';
 
 export const StudentAttendancePage: React.FC = () => {
   const { user } = useAuth();
-  const { allAttendance, todayAttendance } = useAttendance();
+  const { allAttendance, todayAttendance, refreshAttendance, isRefreshing } = useAttendance();
 
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'Present' | 'Absent'>('all');
   const [monthFilter, setMonthFilter] = useState<string>('all');
+  const [refreshNotification, setRefreshNotification] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
-  const studentRfid = user?.rfidUID;
+  // Resilient student metadata resolution
+  const resolvedInfo = useMemo(() => {
+    return (
+      lookupStudentInfo(user?.rfidUID || '') ||
+      lookupStudentInfo(user?.studentId || user?.rollNumber || '') ||
+      lookupStudentInfo(user?.uid || '') ||
+      (user?.email ? lookupStudentInfo(user.email) : null) ||
+      (user?.displayName ? lookupStudentInfo(user.displayName) : null)
+    );
+  }, [user]);
+
+  const studentRfid = (user?.rfidUID || resolvedInfo?.rfidUID || '').trim().toUpperCase();
+  const studentAuthUid = user?.uid;
+  const studentEmail = user?.email?.toLowerCase();
+  const studentRoll = (user?.studentId || user?.rollNumber || resolvedInfo?.studentId || '').trim();
+
+  const now = new Date();
+  const localTodayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const utcTodayStr = now.toISOString().split('T')[0];
 
   // Build daily records for every institutional recorded date
   const records = useMemo(() => {
     const dates = new Set<string>(Object.keys(allAttendance));
-    const todayStr = new Date().toISOString().split('T')[0];
-    dates.add(todayStr);
+    dates.add(localTodayStr);
+    dates.add(utcTodayStr);
+    dates.add('2026-11-08');
+
+    Object.values(todayAttendance).forEach((item) => {
+      if (item?.date) dates.add(item.date);
+    });
+
+    const isMatchingStudent = (item: any): boolean => {
+      if (!item) return false;
+      const itemRfid = (item.rfidUID || item.uid || item.studentRfid || '')?.toString().trim().toUpperCase();
+      if (studentRfid && itemRfid && itemRfid === studentRfid) return true;
+      if (studentAuthUid && (item.authUid === studentAuthUid || item.userId === studentAuthUid)) return true;
+      if (studentEmail && item.email && item.email.toLowerCase() === studentEmail) return true;
+      const itemRoll = (item.studentId || item.rollNumber || '')?.toString().trim().toUpperCase();
+      if (studentRoll && itemRoll && itemRoll === studentRoll.toUpperCase()) return true;
+      const itemName = (item.studentName || item.name || '')?.toString().trim().toLowerCase();
+      if (user?.displayName && itemName && (itemName === user.displayName.trim().toLowerCase() || itemName.includes(user.displayName.trim().toLowerCase()))) return true;
+      if (resolvedInfo?.name && itemName && itemName.includes(resolvedInfo.name.trim().toLowerCase())) return true;
+      return false;
+    };
 
     const sortedDates = Array.from(dates).sort().reverse();
 
@@ -35,21 +78,57 @@ export const StudentAttendancePage: React.FC = () => {
       let isPresent = false;
       let time = '--:--:--';
       let device = 'ESP32-RFID-01';
+      let isOverridden = false;
+      let overrideReason = '';
 
-      if (studentRfid) {
-        if (allAttendance[date] && allAttendance[date][studentRfid]) {
-          const rec = allAttendance[date][studentRfid];
-          if (rec.status === 'Present') {
-            isPresent = true;
-            time = rec.time || '--:--:--';
-            device = rec.device || device;
+      // 1. Check in allAttendance[date]
+      if (allAttendance[date]) {
+        const candidates = [
+          studentRfid ? allAttendance[date][studentRfid] : undefined,
+          studentRfid ? allAttendance[date][studentRfid.toLowerCase()] : undefined,
+          studentAuthUid ? allAttendance[date][studentAuthUid] : undefined,
+          ...Object.values(allAttendance[date]),
+        ];
+        for (const item of candidates) {
+          if (item && isMatchingStudent(item)) {
+            if (item.isDeleted) continue;
+            if (item.status === 'Present') {
+              isPresent = true;
+              time = item.time || time;
+              device = item.device || device;
+              break;
+            } else if (item.isOverridden) {
+              isOverridden = true;
+              overrideReason = item.overrideReason || '';
+              time = item.time || time;
+              device = item.device || device;
+            }
           }
-        } else if (date === todayStr && todayAttendance[studentRfid]) {
-          const rec = todayAttendance[studentRfid];
-          if (rec.status === 'Present') {
-            isPresent = true;
-            time = rec.time || '--:--:--';
-            device = rec.device || device;
+        }
+      }
+
+      // 2. Check in todayAttendance if this date matches
+      if (!isPresent) {
+        const todayCandidates = [
+          studentRfid ? todayAttendance[studentRfid] : undefined,
+          studentRfid ? todayAttendance[studentRfid.toLowerCase()] : undefined,
+          studentAuthUid ? todayAttendance[studentAuthUid] : undefined,
+          ...Object.values(todayAttendance),
+        ];
+        for (const item of todayCandidates) {
+          if (item && isMatchingStudent(item)) {
+            if (item.isDeleted) continue;
+            if (item.status === 'Present' && (item.date === date || (!item.date && (date === localTodayStr || date === utcTodayStr)))) {
+              isPresent = true;
+              time = item.time || time;
+              device = item.device || device;
+              break;
+            } else if (item.isOverridden) {
+              isOverridden = true;
+              overrideReason = item.overrideReason || '';
+              time = item.time || time;
+              device = item.device || device;
+            }
           }
         }
       }
@@ -58,11 +137,13 @@ export const StudentAttendancePage: React.FC = () => {
         date,
         time,
         status: isPresent ? ('Present' as const) : ('Absent' as const),
+        isOverridden,
+        overrideReason,
         device,
         studentUid: studentRfid || 'UNASSIGNED',
       };
     });
-  }, [allAttendance, todayAttendance, studentRfid]);
+  }, [allAttendance, todayAttendance, studentRfid, studentAuthUid, studentEmail, studentRoll, user?.displayName, resolvedInfo?.name, localTodayStr, utcTodayStr]);
 
   // Unique available months for filter dropdown
   const availableMonths = useMemo(() => {
@@ -120,24 +201,83 @@ export const StudentAttendancePage: React.FC = () => {
     document.body.removeChild(link);
   };
 
+  const handleManualRefresh = async () => {
+    const res = await refreshAttendance();
+    setRefreshNotification({
+      type: res.success ? 'success' : 'error',
+      message: res.message,
+    });
+    setTimeout(() => {
+      setRefreshNotification(null);
+    }, 4500);
+  };
+
   return (
     <div className="space-y-6">
-      {/* Header & Export */}
+      {/* Header & Actions */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-6 rounded-3xl bg-[#0c1220] border border-slate-800 shadow-xl">
         <div>
-          <h2 className="text-lg font-bold text-white tracking-tight">Personal Attendance Log</h2>
-          <p className="text-xs text-slate-400">
-            Complete historical log of all RFID check-in events recorded for your card ({studentRfid || 'Unassigned'})
+          <div className="flex items-center gap-2.5">
+            <h2 className="text-lg font-bold text-white tracking-tight">Personal Attendance Log</h2>
+            <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 text-[10px] font-mono border border-emerald-500/20">
+              Live Synced
+            </span>
+          </div>
+          <p className="text-xs text-slate-400 mt-1">
+            Historical log of all RFID check-in events recorded for your card ({studentRfid || 'Unassigned'})
           </p>
         </div>
-        <button
-          onClick={handleExportCSV}
-          className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 text-xs font-semibold transition cursor-pointer self-start sm:self-auto"
-        >
-          <Download className="w-4 h-4 text-emerald-400" />
-          <span>Export My CSV</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2.5 self-start sm:self-auto">
+          {/* Explicit Manual Refresh Button */}
+          <button
+            onClick={handleManualRefresh}
+            disabled={isRefreshing}
+            className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border text-xs font-semibold transition cursor-pointer shadow-lg ${
+              isRefreshing
+                ? 'bg-slate-900 border-slate-700 text-slate-400 cursor-not-allowed'
+                : 'bg-emerald-600/20 hover:bg-emerald-600/30 border-emerald-500/40 text-emerald-300 hover:text-emerald-200 shadow-emerald-950/40 active:scale-95'
+            }`}
+            title="Force re-fetch attendance records from Firebase Realtime Database and Firestore"
+          >
+            <RotateCcw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-emerald-400' : 'text-emerald-400'}`} />
+            <span>{isRefreshing ? 'Refreshing from Firebase...' : 'Manual Refresh'}</span>
+          </button>
+
+          <button
+            onClick={handleExportCSV}
+            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 text-xs font-semibold transition cursor-pointer"
+          >
+            <Download className="w-4 h-4 text-slate-400" />
+            <span>Export My CSV</span>
+          </button>
+        </div>
       </div>
+
+      {/* Manual Refresh Feedback Banner */}
+      {refreshNotification && (
+        <div
+          className={`p-3.5 rounded-2xl flex items-center justify-between text-xs animate-in fade-in slide-in-from-top-2 duration-200 border ${
+            refreshNotification.type === 'success'
+              ? 'bg-emerald-950/40 border border-emerald-500/30 text-emerald-300'
+              : 'bg-rose-950/40 border border-rose-500/30 text-rose-300'
+          }`}
+        >
+          <div className="flex items-center gap-2.5">
+            {refreshNotification.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            ) : (
+              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+            )}
+            <span className="font-medium">{refreshNotification.message}</span>
+          </div>
+          <button
+            onClick={() => setRefreshNotification(null)}
+            className="text-slate-400 hover:text-white p-1 rounded-lg transition"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Filters Bar */}
       <div className="p-4 rounded-2xl bg-[#0c1220] border border-slate-800 flex flex-col md:flex-row gap-3 items-center justify-between">
@@ -265,6 +405,14 @@ export const StudentAttendancePage: React.FC = () => {
                           <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 font-semibold text-[11px] border border-emerald-500/20">
                             <CheckCircle2 className="w-3 h-3" />
                             <span>Present</span>
+                          </span>
+                        ) : rec.isOverridden ? (
+                          <span 
+                            title={rec.overrideReason ? `Admin Override: ${rec.overrideReason}` : 'Overridden by Administrator'}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-rose-500/15 text-rose-300 font-semibold text-[11px] border border-rose-500/30"
+                          >
+                            <Ban className="w-3 h-3 text-rose-400" />
+                            <span>Absent (Admin Override)</span>
                           </span>
                         ) : (
                           <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-rose-500/10 text-rose-400 font-semibold text-[11px] border border-rose-500/20">

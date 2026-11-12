@@ -19,8 +19,10 @@ export interface Student {
   phone: string;
   registeredAt: string;
   avatar?: string;
-  status: 'active' | 'inactive';
+  status: 'active' | 'inactive' | 'suspended';
   authUid?: string; // Associated Firebase Auth UID
+  isSuspended?: boolean;
+  activeSuspension?: StudentSuspension;
 }
 
 export interface UserProfile {
@@ -64,17 +66,124 @@ export interface StudentRegistrationInput {
   phone?: string;
 }
 
+export type AttendanceStatus = 'Present' | 'Absent' | 'Late' | 'Excused' | 'Duplicate' | 'Unknown';
+
+export interface StudentSuspension {
+  id: string;
+  studentRfid: string;
+  studentName: string;
+  studentId: string;
+  duration: '1_day' | '1_week' | '1_month' | 'custom';
+  startDate: string; // YYYY-MM-DD
+  endDate: string; // YYYY-MM-DD
+  reason: string;
+  suspendedBy: string; // admin email
+  createdAt: number;
+  status: 'active' | 'expired' | 'revoked';
+  revokedAt?: number;
+  revokedBy?: string;
+  revocationReason?: string;
+}
+
+export interface AttendanceEditHistory {
+  editedAt: number;
+  editedBy: string;
+  reason?: string;
+  prevData: {
+    date: string;
+    time: string;
+    status: AttendanceStatus;
+    device?: string;
+    notes?: string;
+  };
+}
+
 export interface AttendanceRecord {
   uid: string; // RFID UID
+  rfidUID?: string;
+  studentRfid?: string;
+  authUid?: string;
+  userId?: string;
   studentName?: string;
-  studentId?: string;
+  studentId?: string; // Roll number
+  rollNumber?: string;
   department?: string;
   date: string; // YYYY-MM-DD
   time: string; // HH:MM:SS
   timestamp: number;
-  status: 'Present' | 'Late' | 'Duplicate' | 'Unknown';
+  status: AttendanceStatus;
   device?: string; // e.g., 'ESP32-RFID-01'
   notes?: string;
+
+  // Manual Override System
+  isOverridden?: boolean;
+  overrideReason?: string;
+  overrideBy?: string;
+  overrideAt?: number;
+  originalRecord?: {
+    status: AttendanceStatus;
+    time: string;
+    timestamp: number;
+    device?: string;
+  };
+
+  // Soft Delete & Trash
+  isDeleted?: boolean;
+  deletedAt?: number;
+  deletedBy?: string;
+  deleteReason?: string;
+
+  // Edit History & Restoration
+  previousEdits?: AttendanceEditHistory[];
+  lastModifiedBy?: string;
+  lastModifiedAt?: number;
+}
+
+export interface TrashAttendanceRecord extends AttendanceRecord {
+  trashId: string;
+  deletedAt: number;
+  deletedBy: string;
+  deleteReason?: string;
+  originalPath: string;
+}
+
+export interface AuditActivityLog {
+  id: string;
+  action: 
+    | 'EDIT_ATTENDANCE'
+    | 'DELETE_ATTENDANCE'
+    | 'RESTORE_ATTENDANCE'
+    | 'OVERRIDE_ATTENDANCE'
+    | 'REMOVE_OVERRIDE'
+    | 'BULK_STATUS_CHANGE'
+    | 'BULK_DELETE'
+    | 'BULK_RESTORE'
+    | 'SUSPEND_STUDENT'
+    | 'UNSUSPEND_STUDENT'
+    | 'UNDO_OPERATION';
+  studentRfid?: string;
+  studentName?: string;
+  studentId?: string;
+  date?: string;
+  adminEmail: string;
+  adminUid: string;
+  timestamp: number;
+  timestampStr: string;
+  reason?: string;
+  details?: string;
+  previousValues?: any;
+  updatedValues?: any;
+  affectedCount?: number;
+}
+
+export interface UndoAction {
+  id: string;
+  type: 'EDIT' | 'DELETE' | 'OVERRIDE' | 'BULK_DELETE' | 'BULK_EDIT' | 'REMOVE_OVERRIDE';
+  description: string;
+  timestamp: number;
+  expiresAt: number; // now + 30000ms
+  revertData: any;
+  executed: boolean;
 }
 
 export interface AttendanceFilter {
@@ -136,3 +245,4 @@ export interface ResetAuditLog {
   timestampStr: string;
   description?: string;
 }
+

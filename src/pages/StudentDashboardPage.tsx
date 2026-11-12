@@ -11,12 +11,17 @@ import {
   User, 
   Mail, 
   Building2,
-  CalendarDays
+  CalendarDays,
+  RotateCcw,
+  ShieldAlert,
+  AlertTriangle,
+  Ban
 } from 'lucide-react';
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, PieChart, Pie, Cell } from 'recharts';
 import { useAuth } from '../context/AuthContext';
 import { useAttendance } from '../context/AttendanceContext';
 import { StudentTab } from '../components/StudentSidebar';
+import { lookupStudentInfo } from '../services/firebase';
 
 interface StudentDashboardPageProps {
   onNavigateTab: (tab: StudentTab) => void;
@@ -24,65 +29,191 @@ interface StudentDashboardPageProps {
 
 export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNavigateTab }) => {
   const { user } = useAuth();
-  const { allAttendance, todayAttendance } = useAttendance();
+  const { allAttendance, todayAttendance, refreshAttendance, isRefreshing, studentsList, suspensions } = useAttendance();
 
-  const studentRfid = user?.rfidUID;
+  // Resilient student metadata resolution
+  const resolvedInfo = useMemo(() => {
+    return (
+      lookupStudentInfo(user?.rfidUID || '') ||
+      lookupStudentInfo(user?.studentId || user?.rollNumber || '') ||
+      lookupStudentInfo(user?.uid || '') ||
+      (user?.email ? lookupStudentInfo(user.email) : null) ||
+      (user?.displayName ? lookupStudentInfo(user.displayName) : null)
+    );
+  }, [user]);
 
-  // Extract all attendance records for this student
+  const studentRfid = (user?.rfidUID || resolvedInfo?.rfidUID || '').trim().toUpperCase();
+  const studentAuthUid = user?.uid;
+  const studentEmail = user?.email?.toLowerCase();
+  const studentRoll = (user?.studentId || user?.rollNumber || resolvedInfo?.studentId || '').trim();
+
+  // Find if student profile is marked suspended or has an active suspension entry
+  const studentProfile = useMemo(() => {
+    return studentsList.find((s) => s.uid.toUpperCase() === studentRfid);
+  }, [studentsList, studentRfid]);
+
+  const activeSuspension = useMemo(() => {
+    if (studentProfile?.activeSuspension && studentProfile.status === 'suspended') {
+      return studentProfile.activeSuspension;
+    }
+    const today = new Date().toISOString().split('T')[0];
+    const studentSuspList = suspensions[studentRfid] || [];
+    return studentSuspList.find(
+      (s: any) => s.status === 'active' && s.endDate >= today
+    );
+  }, [studentProfile, suspensions, studentRfid]);
+
+  const isSuspended = Boolean(activeSuspension || studentProfile?.status === 'suspended' || studentProfile?.isSuspended);
+
+  // Today's date in local and UTC formats to eliminate timezone discrepancies
+  const now = new Date();
+  const localTodayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const utcTodayStr = now.toISOString().split('T')[0];
+  const todayStr = localTodayStr;
+
+  // Extract all attendance records for this student with resilient multi-identifier matching
   const studentRecords = useMemo(() => {
-    if (!studentRfid) return [];
-    const records: { date: string; time: string; timestamp: number; device: string; status: string }[] = [];
+    const recordsMap = new Map<string, { 
+      date: string; 
+      time: string; 
+      timestamp: number; 
+      device: string; 
+      status: string;
+      isOverridden?: boolean;
+      overrideReason?: string;
+    }>();
 
-    // Scan all dates in allAttendance
+    // Helper to test if a record belongs to this student
+    const isMatchingStudent = (item: any): boolean => {
+      if (!item) return false;
+      const itemRfid = (item.rfidUID || item.uid || item.studentRfid || '')?.toString().trim().toUpperCase();
+      if (studentRfid && itemRfid && itemRfid === studentRfid) return true;
+      if (studentAuthUid && (item.authUid === studentAuthUid || item.userId === studentAuthUid)) return true;
+      if (studentEmail && item.email && item.email.toLowerCase() === studentEmail) return true;
+      const itemRoll = (item.studentId || item.rollNumber || '')?.toString().trim().toUpperCase();
+      if (studentRoll && itemRoll && itemRoll === studentRoll.toUpperCase()) return true;
+      const itemName = (item.studentName || item.name || '')?.toString().trim().toLowerCase();
+      if (user?.displayName && itemName && (itemName === user.displayName.trim().toLowerCase() || itemName.includes(user.displayName.trim().toLowerCase()))) return true;
+      if (resolvedInfo?.name && itemName && itemName.includes(resolvedInfo.name.trim().toLowerCase())) return true;
+      return false;
+    };
+
+    // 1. Scan all dates in allAttendance
     const dateKeys = Object.keys(allAttendance).sort();
     dateKeys.forEach((date) => {
       const dayData = allAttendance[date];
-      if (dayData && dayData[studentRfid]) {
-        const item = dayData[studentRfid];
-        records.push({
-          date: item.date || date,
-          time: item.time || '',
-          timestamp: item.timestamp || new Date(date).getTime(),
-          device: item.device || 'ESP32-RFID-01',
-          status: item.status || 'Present',
-        });
+      if (dayData) {
+        // Direct key lookups + entry scanning
+        const candidates = [
+          studentRfid ? dayData[studentRfid] : undefined,
+          studentRfid ? dayData[studentRfid.toLowerCase()] : undefined,
+          studentAuthUid ? dayData[studentAuthUid] : undefined,
+          ...Object.values(dayData),
+        ];
+
+        for (const item of candidates) {
+          if (item && isMatchingStudent(item)) {
+            // Ignore deleted records
+            if (item.isDeleted) continue;
+
+            const dateVal = item.date || date;
+            recordsMap.set(dateVal, {
+              date: dateVal,
+              time: item.time || '',
+              timestamp: item.timestamp || new Date(date).getTime(),
+              device: item.device || 'ESP32-RFID-01',
+              status: item.status || 'Present',
+              isOverridden: Boolean(item.isOverridden),
+              overrideReason: item.overrideReason || '',
+            });
+            break;
+          }
+        }
       }
     });
 
-    // Also include today if in todayAttendance
-    if (todayAttendance[studentRfid]) {
-      const todayItem = todayAttendance[studentRfid];
-      const exists = records.some((r) => r.date === todayItem.date);
-      if (!exists) {
-        records.push({
-          date: todayItem.date,
-          time: todayItem.time,
-          timestamp: todayItem.timestamp,
-          device: todayItem.device || 'ESP32-RFID-01',
-          status: todayItem.status || 'Present',
+    // 2. Also check todayAttendance
+    const todayCandidates = [
+      studentRfid ? todayAttendance[studentRfid] : undefined,
+      studentRfid ? todayAttendance[studentRfid.toLowerCase()] : undefined,
+      studentAuthUid ? todayAttendance[studentAuthUid] : undefined,
+      ...Object.values(todayAttendance),
+    ];
+
+    for (const item of todayCandidates) {
+      if (item && isMatchingStudent(item)) {
+        if (item.isDeleted) continue;
+        const dateVal = item.date || localTodayStr;
+        recordsMap.set(dateVal, {
+          date: dateVal,
+          time: item.time || '',
+          timestamp: item.timestamp || Date.now(),
+          device: item.device || 'ESP32-RFID-01',
+          status: item.status || 'Present',
+          isOverridden: Boolean(item.isOverridden),
+          overrideReason: item.overrideReason || '',
         });
+        break;
       }
     }
 
-    return records.sort((a, b) => b.timestamp - a.timestamp);
-  }, [allAttendance, todayAttendance, studentRfid]);
+    return Array.from(recordsMap.values()).sort((a, b) => b.timestamp - a.timestamp);
+  }, [allAttendance, todayAttendance, studentRfid, studentAuthUid, studentEmail, studentRoll, user?.displayName, resolvedInfo?.name, localTodayStr]);
 
   // Total recorded institutional working days (distinct dates in allAttendance + today)
   const allRecordedDates = useMemo(() => {
     const dates = new Set<string>(Object.keys(allAttendance));
-    const todayStr = new Date().toISOString().split('T')[0];
-    dates.add(todayStr);
+    dates.add(localTodayStr);
+    dates.add(utcTodayStr);
     return Array.from(dates).sort();
-  }, [allAttendance]);
+  }, [allAttendance, localTodayStr, utcTodayStr]);
 
   const totalWorkingDays = allRecordedDates.length;
   const presentDays = studentRecords.filter((r) => r.status === 'Present').length;
   const absentDays = Math.max(0, totalWorkingDays - presentDays);
   const attendanceRate = totalWorkingDays > 0 ? Math.round((presentDays / totalWorkingDays) * 100) : 100;
 
-  // Today check-in status
-  const todayStr = new Date().toISOString().split('T')[0];
-  const todayRecord = studentRfid ? todayAttendance[studentRfid] : undefined;
+  // Today check-in status (matches local date, UTC date, or latest scan)
+  const todayRecord = useMemo(() => {
+    // 1. Check if any record in studentRecords matches today (local or UTC)
+    const matchRecord = studentRecords.find(
+      (r) => (r.date === localTodayStr || r.date === utcTodayStr) && r.status === 'Present'
+    );
+    if (matchRecord) return matchRecord;
+
+    // 2. Check todayAttendance candidates directly
+    const todayCandidates = [
+      studentRfid ? todayAttendance[studentRfid] : undefined,
+      studentRfid ? todayAttendance[studentRfid.toLowerCase()] : undefined,
+      studentAuthUid ? todayAttendance[studentAuthUid] : undefined,
+      ...Object.values(todayAttendance),
+    ];
+    for (const item of todayCandidates) {
+      if (item && (
+        (studentRfid && (item.rfidUID?.toUpperCase() === studentRfid || item.uid?.toUpperCase() === studentRfid)) ||
+        (studentAuthUid && (item.authUid === studentAuthUid || item.userId === studentAuthUid))
+      ) && item.status === 'Present') {
+        return {
+          date: item.date || localTodayStr,
+          time: item.time || '',
+          timestamp: item.timestamp || Date.now(),
+          device: item.device || 'ESP32-RFID-01',
+          status: item.status || 'Present',
+        };
+      }
+    }
+
+    // 3. Fallback: check if the student has ANY record in studentRecords
+    if (studentRecords.length > 0) {
+      const latest = studentRecords[0];
+      if (latest && latest.status === 'Present') {
+        return latest;
+      }
+    }
+
+    return null;
+  }, [studentRecords, todayAttendance, localTodayStr, utcTodayStr, studentRfid, studentAuthUid]);
+
   const isPresentToday = Boolean(todayRecord && todayRecord.status === 'Present');
 
   // Monthly breakdown for Chart
@@ -128,6 +259,35 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
 
   return (
     <div className="space-y-6">
+      {/* Student Account Suspension Alert Banner */}
+      {isSuspended && (
+        <div className="p-4 sm:p-5 rounded-3xl bg-gradient-to-r from-amber-950/60 via-red-950/40 to-slate-900 border border-amber-500/40 text-amber-200 shadow-xl flex items-start gap-3.5 animate-in fade-in slide-in-from-top-2">
+          <div className="p-2 rounded-2xl bg-amber-500/20 text-amber-400 shrink-0 border border-amber-500/30">
+            <ShieldAlert className="w-5 h-5" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="text-sm font-bold text-amber-300">
+                Attendance Account Suspended
+              </h3>
+              <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 font-mono text-[10px] font-bold border border-amber-500/30">
+                {activeSuspension?.duration || 'Active Suspension'}
+              </span>
+            </div>
+            <p className="text-xs text-amber-200/90 mt-1 leading-relaxed">
+              Your RFID attendance recording privileges are currently suspended 
+              {activeSuspension?.endDate ? ` until ${activeSuspension.endDate}` : ''}. 
+              Card scans on institutional hardware readers will be rejected during this period.
+            </p>
+            {activeSuspension?.reason && (
+              <p className="text-xs text-slate-300 mt-2 bg-black/40 p-2.5 rounded-xl border border-amber-500/20 font-mono">
+                <strong className="text-amber-400">Official Reason:</strong> {activeSuspension.reason}
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Student Profile Hero Card */}
       <div className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-[#0d1527] via-[#0a0f1d] to-[#070b14] border border-slate-800 p-6 sm:p-8 shadow-2xl">
         <div className="absolute top-0 right-0 w-80 h-80 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none" />
@@ -174,7 +334,11 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
           {/* Today Check-in Status Pill */}
           <div className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800/90 flex flex-col items-start sm:items-end justify-center">
             <span className="text-[10px] uppercase font-mono tracking-wider text-slate-400 mb-1">
-              Today's Status ({todayStr})
+              {isPresentToday
+                ? (todayRecord?.date === localTodayStr || todayRecord?.date === utcTodayStr)
+                  ? `Today's Status (${todayRecord.date})`
+                  : `Latest Session Scan (${todayRecord?.date})`
+                : `Today's Status (${todayStr})`}
             </span>
             {isPresentToday ? (
               <div className="flex items-center gap-2">
@@ -192,8 +356,23 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
               </div>
             )}
             <p className="text-[10px] text-slate-500 mt-1">
-              Tap your registered RFID card at the reader
+              {isPresentToday
+                ? `Verified via ${todayRecord?.device || 'ESP32-RFID-01'}`
+                : 'Tap your registered RFID card at the reader'}
             </p>
+            <button
+              onClick={() => refreshAttendance()}
+              disabled={isRefreshing}
+              className={`mt-2.5 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-[11px] font-semibold transition cursor-pointer ${
+                isRefreshing
+                  ? 'bg-slate-900 border-slate-700 text-slate-400 cursor-not-allowed'
+                  : 'bg-slate-800/90 hover:bg-slate-750 border-slate-700 text-emerald-300 hover:text-emerald-200'
+              }`}
+              title="Re-fetch attendance records directly from Firebase"
+            >
+              <RotateCcw className={`w-3 h-3 ${isRefreshing ? 'animate-spin text-emerald-400' : 'text-emerald-400'}`} />
+              <span>{isRefreshing ? 'Syncing...' : 'Sync Attendance'}</span>
+            </button>
           </div>
         </div>
       </div>
@@ -421,10 +600,25 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
                       {rec.time}
                     </td>
                     <td className="py-3 px-3">
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 font-semibold text-[11px] border border-emerald-500/20">
-                        <CheckCircle2 className="w-3 h-3" />
-                        <span>Present</span>
-                      </span>
+                      {rec.status === 'Present' ? (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 font-semibold text-[11px] border border-emerald-500/20">
+                          <CheckCircle2 className="w-3 h-3" />
+                          <span>Present</span>
+                        </span>
+                      ) : rec.isOverridden ? (
+                        <span 
+                          title={rec.overrideReason ? `Admin Override: ${rec.overrideReason}` : 'Overridden by Administrator'}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-rose-500/15 text-rose-300 font-semibold text-[11px] border border-rose-500/30"
+                        >
+                          <Ban className="w-3 h-3 text-rose-400" />
+                          <span>Absent (Admin Override)</span>
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-rose-500/10 text-rose-400 font-semibold text-[11px] border border-rose-500/20">
+                          <XCircle className="w-3 h-3" />
+                          <span>Absent</span>
+                        </span>
+                      )}
                     </td>
                     <td className="py-3 px-3 font-mono text-slate-400">
                       <span className="flex items-center gap-1.5">

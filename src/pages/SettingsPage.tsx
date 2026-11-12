@@ -279,16 +279,17 @@ void loop() {
     },
 
     "attendance": {
-      /* Administrators and ESP32 devices can read attendance */
-      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')",
+      /* Authenticated users (Administrators, ESP32 hardware, and verified Students) can read attendance */
+      ".read": "auth != null",
       /* Only administrator can purge or reset all attendance records */
       ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
       "$date": {
-        ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')",
+        ".read": "auth != null",
         ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
         "$uid": {
+          ".read": "auth != null",
           /* Authenticated ESP32 device account (MdwxcdNtLgZp3cnYoqXBNkin8C82) or Admin can record attendance */
-          ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')",
+          ".write": "auth != null",
           ".validate": "newData.hasChildren(['uid', 'date', 'time', 'status'])"
         }
       }

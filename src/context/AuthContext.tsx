@@ -13,6 +13,7 @@ import {
   getActiveFirebaseConfig, 
   refreshAdminToken,
   getUserProfile,
+  lookupStudentInfo,
   sendPasswordReset,
   updateUserPassword,
   CONFIGURED_ADMIN_UID,
@@ -70,22 +71,65 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     try {
       // Fast timeout protected profile fetch
-      const profile = await withTimeout(
+      let profile = await withTimeout(
         getUserProfile(fbUser.uid, fbUser.email),
         4000,
         null
       );
 
+      // Fail-safe student profile fallback via lookupStudentInfo
+      if (!profile || !profile.role) {
+        const studentInfo = lookupStudentInfo(fbUser.email || '') || lookupStudentInfo(fbUser.uid);
+        if (studentInfo) {
+          profile = {
+            uid: fbUser.uid,
+            name: studentInfo.name,
+            email: fbUser.email || '',
+            rollNumber: studentInfo.studentId,
+            department: studentInfo.department,
+            year: 'Final Year',
+            semester: 'Semester 8',
+            role: 'student',
+            rfidUID: studentInfo.rfidUID,
+            createdAt: Date.now(),
+          };
+        }
+      }
+
+      // Ensure existing student profiles have valid rfidUID and studentId mapped
+      if (profile && profile.role === 'student') {
+        const studentInfo = lookupStudentInfo(profile.rfidUID || '') || 
+                            lookupStudentInfo(profile.rollNumber || '') || 
+                            lookupStudentInfo(fbUser.email || '') || 
+                            lookupStudentInfo(fbUser.uid);
+        if (studentInfo) {
+          if (!profile.rfidUID) profile.rfidUID = studentInfo.rfidUID;
+          if (!profile.rollNumber) profile.rollNumber = studentInfo.studentId;
+          if (!profile.name) profile.name = studentInfo.name;
+          if (!profile.department) profile.department = studentInfo.department;
+        }
+      }
+
       if (profile && (profile.role === 'admin' || profile.role === 'student')) {
+        const studentInfo = profile.role === 'student'
+          ? (lookupStudentInfo(profile.rfidUID || '') || lookupStudentInfo(profile.rollNumber || '') || lookupStudentInfo(fbUser.email || '') || lookupStudentInfo(fbUser.uid))
+          : null;
+
+        const resolvedRfid = profile.role === 'student'
+          ? (profile.rfidUID || studentInfo?.rfidUID || '').trim().toUpperCase()
+          : undefined;
+
+        const resolvedRoll = profile.rollNumber || (profile.role === 'student' ? studentInfo?.studentId : undefined);
+
         const appUser: AppUser = {
           uid: fbUser.uid,
           email: fbUser.email,
-          displayName: profile.name || fbUser.displayName || fbUser.email?.split('@')[0] || (profile.role === 'admin' ? 'Administrator' : 'Student'),
+          displayName: profile.name || fbUser.displayName || studentInfo?.name || fbUser.email?.split('@')[0] || (profile.role === 'admin' ? 'Administrator' : 'Student'),
           role: profile.role,
-          rfidUID: profile.rfidUID,
-          studentId: profile.rollNumber,
-          rollNumber: profile.rollNumber,
-          department: profile.department,
+          rfidUID: resolvedRfid || undefined,
+          studentId: resolvedRoll || undefined,
+          rollNumber: resolvedRoll || undefined,
+          department: profile.department || studentInfo?.department,
           year: profile.year,
           semester: profile.semester,
           phone: profile.phone,
@@ -230,7 +274,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         error: 'Your account exists, but your student profile has not been configured. Contact your administrator.'
       };
     } catch (err: any) {
-      console.error('Firebase Auth sign in error:', err);
+      console.warn('Firebase Auth sign in attempt result:', err?.code || err?.message);
       let msg = 'Incorrect email or password.';
       
       if (
@@ -238,7 +282,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         err.code === 'auth/wrong-password' || 
         err.code === 'auth/invalid-credential'
       ) {
-        msg = 'Incorrect email or password.';
+        msg = 'Incorrect email or password. Please check your credentials and try again.';
       } else if (err.code === 'auth/network-request-failed') {
         msg = 'Unable to connect. Check your internet connection and try again.';
       } else if (err.code === 'auth/invalid-email') {

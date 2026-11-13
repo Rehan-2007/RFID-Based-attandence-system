@@ -36,7 +36,10 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
     deleteStudent, 
     seedDefaultStudents,
     todayAttendance,
-    scanRfidCard 
+    scanRfidCard,
+    isAfterDeadline,
+    isTodayHoliday,
+    attendanceDeadline
   } = useAttendance();
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -308,8 +311,9 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
                 </tr>
               ) : (
                 filteredStudents.map((st) => {
-                  const isPresent = Boolean(todayAttendance[st.uid]);
                   const todayRecord = todayAttendance[st.uid];
+                  const isPresent = Boolean(todayRecord && !todayRecord.isDeleted && todayRecord.status === 'Present');
+                  const isAbsentMarked = Boolean(todayRecord && !todayRecord.isDeleted && todayRecord.status === 'Absent');
                   const isSuspended = st.status === 'suspended' || Boolean(st.isSuspended);
 
                   return (
@@ -397,9 +401,22 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
                             <CheckCircle2 className="w-3 h-3" />
                             <span>Present ({todayRecord?.time})</span>
                           </div>
+                        ) : isAbsentMarked ? (
+                          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-rose-500/10 border border-rose-500/30 text-rose-400 font-medium">
+                            <UserX className="w-3 h-3" />
+                            <span>{todayRecord?.isOverridden ? 'Absent (Override)' : 'Absent'}</span>
+                          </div>
+                        ) : isTodayHoliday ? (
+                          <div className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-300 font-medium">
+                            <span>Holiday</span>
+                          </div>
+                        ) : isAfterDeadline ? (
+                          <div className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-rose-500/10 border border-rose-500/30 text-rose-400 font-medium">
+                            <span>Absent (After {attendanceDeadline})</span>
+                          </div>
                         ) : (
-                          <div className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-slate-800/80 border border-slate-700/60 text-slate-400 font-medium">
-                            <span>Not Scanned</span>
+                          <div className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-amber-500/10 border border-amber-500/25 text-amber-300 font-medium">
+                            <span>Pending</span>
                           </div>
                         )}
                       </td>
@@ -466,10 +483,10 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
           <div 
-            className="w-full max-w-lg bg-[#0d1322] border border-slate-700/80 rounded-2xl shadow-2xl overflow-hidden"
+            className="w-full max-w-lg max-h-[90vh] flex flex-col bg-[#0d1322] border border-slate-700/80 rounded-2xl shadow-2xl overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="p-5 border-b border-slate-800 flex items-center justify-between bg-slate-900/60">
+            <div className="p-5 border-b border-slate-800 flex items-center justify-between bg-slate-900/60 shrink-0">
               <h3 className="text-base font-bold text-white flex items-center gap-2">
                 <Users className="w-4 h-4 text-blue-400" />
                 <span>{editingStudent ? 'Edit Student Details' : 'Register New Student'}</span>
@@ -482,7 +499,7 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
               </button>
             </div>
 
-            <form onSubmit={handleSaveStudent} className="p-6 space-y-4">
+            <form onSubmit={handleSaveStudent} className="p-6 space-y-4 overflow-y-auto flex-1">
               {formError && (
                 <div className="p-3 rounded-xl bg-rose-950/40 border border-rose-500/40 text-rose-300 text-xs flex items-center gap-2">
                   <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
@@ -598,7 +615,7 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
               </div>
 
               {/* Email & Phone */}
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1">
                     Email Address {!editingStudent && formData.createAuthAccount ? '*' : ''}

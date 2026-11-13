@@ -14,7 +14,8 @@ import {
   Award
 } from 'lucide-react';
 import { useAttendance } from '../context/AttendanceContext';
-import { StudentAttendanceSummary } from '../types';
+import { AttendanceRecord, StudentAttendanceSummary } from '../types';
+import { getPastISTDates } from '../utils/dateUtils';
 
 export const ReportsPage: React.FC = () => {
   const { 
@@ -22,23 +23,39 @@ export const ReportsPage: React.FC = () => {
     allAttendance, 
     todayAttendance, 
     getStudentAttendanceSummary, 
-    totalStudentsCount 
+    totalStudentsCount,
+    workingDays,
+    todayStr
   } = useAttendance();
 
-  const todayStr = useMemo(() => new Date().toISOString().split('T')[0], []);
   const [reportType, setReportType] = useState<'daily' | 'weekly' | 'monthly' | 'student-wise'>('daily');
   const [selectedDate, setSelectedDate] = useState(todayStr);
   const [selectedDept, setSelectedDept] = useState('All');
+  const [selectedSemester, setSelectedSemester] = useState('All');
   const [searchQuery, setSearchQuery] = useState('');
 
-  const departments = [
-    'All',
-    'Computer Science & Engineering',
-    'Electronics & Communication',
-    'Information Technology',
-    'Mechanical Engineering',
-    'Civil Engineering',
-  ];
+  const departments = useMemo(() => {
+    const defaults = [
+      'Computer Science & Engineering',
+      'Electronics & Communication',
+      'Information Technology',
+      'Mechanical Engineering',
+      'Civil Engineering',
+    ];
+    const set = new Set<string>(defaults);
+    studentsList.forEach((s) => {
+      if (s.department) set.add(s.department);
+    });
+    return ['All', ...Array.from(set)];
+  }, [studentsList]);
+
+  const semesters = useMemo(() => {
+    const set = new Set<string>();
+    studentsList.forEach((s) => {
+      if (s.semester) set.add(s.semester);
+    });
+    return ['All', ...Array.from(set).sort()];
+  }, [studentsList]);
 
   // Calculate student summaries
   const studentSummaries: StudentAttendanceSummary[] = useMemo(() => {
@@ -50,15 +67,17 @@ export const ReportsPage: React.FC = () => {
     return studentSummaries.filter((item) => {
       const q = searchQuery.toLowerCase().trim();
       const matchesSearch = 
+        !q ||
         item.student.name.toLowerCase().includes(q) ||
         item.student.uid.toLowerCase().includes(q) ||
         item.student.studentId.toLowerCase().includes(q);
 
       const matchesDept = selectedDept === 'All' || item.student.department === selectedDept;
+      const matchesSemester = selectedSemester === 'All' || (item.student.semester || '') === selectedSemester;
 
-      return matchesSearch && matchesDept;
+      return matchesSearch && matchesDept && matchesSemester;
     });
-  }, [studentSummaries, searchQuery, selectedDept]);
+  }, [studentSummaries, searchQuery, selectedDept, selectedSemester]);
 
   // Aggregate stats
   const averagePercentage = useMemo(() => {
@@ -72,25 +91,72 @@ export const ReportsPage: React.FC = () => {
     return [...studentSummaries].sort((a, b) => b.percentage - a.percentage)[0];
   }, [studentSummaries]);
 
-  // Records for daily report
-  const dailyRecords = useMemo(() => {
-    const recordsMap = selectedDate === todayStr ? todayAttendance : (allAttendance[selectedDate] || {});
-    return Object.values(recordsMap).filter((rec) => {
-      const student = studentsList.find((s) => s.uid === rec.uid);
-      const dept = rec.department || student?.department || '';
-      const matchesDept = selectedDept === 'All' || dept === selectedDept;
-      const q = searchQuery.toLowerCase().trim();
-      const matchesSearch = 
-        (rec.studentName || '').toLowerCase().includes(q) ||
-        rec.uid.toLowerCase().includes(q);
-      return matchesDept && matchesSearch;
-    });
-  }, [selectedDate, todayStr, todayAttendance, allAttendance, selectedDept, searchQuery, studentsList]);
+  // Records for daily, weekly (7 IST days), or monthly (30 IST days) preview & export
+  const periodRecords = useMemo(() => {
+    let targetDates: string[] = [];
+    if (reportType === 'daily') {
+      targetDates = [selectedDate];
+    } else if (reportType === 'weekly' || reportType === 'monthly') {
+      const daysLimit = reportType === 'weekly' ? 7 : 30;
+      targetDates = getPastISTDates(daysLimit, todayStr)
+        .map((d) => d.date)
+        .filter((d) => !workingDays[d]?.isHoliday)
+        .reverse();
+    }
 
-  // CSV Export Function compatible with Microsoft Excel
+    const collected: AttendanceRecord[] = [];
+    targetDates.forEach((d) => {
+      const recordsMap = d === todayStr ? todayAttendance : (allAttendance[d] || {});
+      const seenUids = new Set<string>();
+      Object.values(recordsMap).forEach((rec) => {
+        if (!rec || rec.isDeleted) return;
+        const uidKey = (rec.rfidUID || rec.uid || '').toUpperCase();
+        if (!uidKey || seenUids.has(uidKey)) return;
+        seenUids.add(uidKey);
+
+        const student = studentsList.find((s) => s.uid.toUpperCase() === uidKey);
+        const dept = rec.department || student?.department || '';
+        const semester = student?.semester || '';
+        const matchesDept = selectedDept === 'All' || dept === selectedDept;
+        const matchesSemester = selectedSemester === 'All' || semester === selectedSemester;
+        const q = searchQuery.toLowerCase().trim();
+        const matchesSearch =
+          !q ||
+          (rec.studentName || student?.name || '').toLowerCase().includes(q) ||
+          uidKey.toLowerCase().includes(q) ||
+          (rec.studentId || student?.studentId || '').toLowerCase().includes(q);
+        if (!matchesDept || !matchesSemester || !matchesSearch) return;
+
+        collected.push({
+          ...rec,
+          studentName: rec.studentName || student?.name || 'Student',
+          studentId: rec.studentId || student?.studentId || 'N/A',
+          department: dept || 'N/A',
+        });
+      });
+    });
+
+    return collected.sort((a, b) => {
+      if (a.date !== b.date) return b.date.localeCompare(a.date);
+      return (b.timestamp || 0) - (a.timestamp || 0);
+    });
+  }, [
+    reportType,
+    selectedDate,
+    todayStr,
+    todayAttendance,
+    allAttendance,
+    workingDays,
+    selectedDept,
+    selectedSemester,
+    searchQuery,
+    studentsList,
+  ]);
+
+  // CSV Export Function compatible with Microsoft Excel (UTF-8 BOM)
   const exportToExcelCSV = () => {
-    let csvRows: string[] = [];
-    let filename = `RFID_Attendance_Report_${reportType}_${new Date().toISOString().split('T')[0]}.csv`;
+    const csvRows: string[] = [];
+    const filename = `RFID_Attendance_Report_${reportType}_${todayStr}.csv`;
 
     const escapeCsv = (val: any) => {
       if (val === null || val === undefined) return '""';
@@ -99,27 +165,25 @@ export const ReportsPage: React.FC = () => {
     };
 
     if (reportType === 'student-wise') {
-      // Header
       csvRows.push([
-        'Student ID',
         'Student Name',
-        'RFID UID',
+        'Roll Number',
+        'Student UID',
         'Department',
         'Academic Year',
         'Total Working Days',
         'Present Days',
         'Absent Days',
-        'Attendance Percentage',
+        'Attendance Rate',
         'Standing',
         'Last Seen Attendance',
       ].map(escapeCsv).join(','));
 
-      // Rows
       filteredSummaries.forEach((s) => {
         const standing = s.percentage >= 75 ? 'Good Standing' : s.percentage >= 60 ? 'Warning' : 'Critical Shortage';
         csvRows.push([
-          s.student.studentId,
           s.student.name,
+          s.student.studentId,
           s.student.uid,
           s.student.department,
           s.student.year,
@@ -132,55 +196,29 @@ export const ReportsPage: React.FC = () => {
         ].map(escapeCsv).join(','));
       });
     } else {
-      // Daily, Weekly, or Monthly record log export
       csvRows.push([
-        'Date',
-        'Time',
         'Student Name',
-        'RFID UID',
-        'Student ID',
+        'Roll Number',
+        'Student UID',
+        'Attendance Date',
+        'Check-in Time',
+        'Attendance Status',
         'Department',
-        'Status',
         'Hardware Device ID',
       ].map(escapeCsv).join(','));
 
-      if (reportType === 'daily') {
-        dailyRecords.forEach((r) => {
-          csvRows.push([
-            r.date,
-            r.time,
-            r.studentName || 'Unknown',
-            r.uid,
-            r.studentId || 'N/A',
-            r.department || 'N/A',
-            r.status,
-            r.device || 'ESP32-RFID-01',
-          ].map(escapeCsv).join(','));
-        });
-      } else {
-        // Multi-day export (Weekly / Monthly)
-        const daysLimit = reportType === 'weekly' ? 7 : 30;
-        const allDates = Object.keys(allAttendance).sort().reverse().slice(0, daysLimit);
-        
-        // Also include today
-        const datesToExport = Array.from(new Set([todayStr, ...allDates])).sort().reverse();
-
-        datesToExport.forEach((d) => {
-          const dayMap = d === todayStr ? todayAttendance : (allAttendance[d] || {});
-          Object.values(dayMap).forEach((r) => {
-            csvRows.push([
-              r.date,
-              r.time,
-              r.studentName || 'Unknown',
-              r.uid,
-              r.studentId || 'N/A',
-              r.department || 'N/A',
-              r.status,
-              r.device || 'ESP32-RFID-01',
-            ].map(escapeCsv).join(','));
-          });
-        });
-      }
+      periodRecords.forEach((r) => {
+        csvRows.push([
+          r.studentName || 'Unknown',
+          r.studentId || 'N/A',
+          r.uid,
+          r.date,
+          r.time,
+          r.status,
+          r.department || 'N/A',
+          r.device || 'ESP32-RFID-01',
+        ].map(escapeCsv).join(','));
+      });
     }
 
     // Prepend UTF-8 BOM (\uFEFF) so Microsoft Excel opens it with proper encoding
@@ -339,26 +377,45 @@ export const ReportsPage: React.FC = () => {
                 onChange={(e) => setSelectedDate(e.target.value)}
                 className="px-3 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono text-xs focus:outline-none focus:border-blue-500"
               />
+              {workingDays[selectedDate]?.isHoliday && (
+                <span className="px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[10px] font-mono font-bold">
+                  HOLIDAY
+                </span>
+              )}
             </div>
           )}
         </div>
 
-        {/* Search & Department Filters */}
-        <div className="flex flex-col md:flex-row gap-3 items-center justify-between pt-3 border-t border-slate-800/80">
-          <div className="relative w-full md:w-72">
-            <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
-              <Search className="w-3.5 h-3.5" />
+        {/* Search, Department & Semester Filters */}
+        <div className="flex flex-col lg:flex-row gap-3 items-center justify-between pt-3 border-t border-slate-800/80">
+          <div className="flex flex-wrap items-center gap-2.5 w-full lg:w-auto">
+            <div className="relative w-full sm:w-64">
+              <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
+                <Search className="w-3.5 h-3.5" />
+              </div>
+              <input
+                type="text"
+                placeholder="Filter by name or UID..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full pl-9 pr-4 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs placeholder:text-slate-500 focus:outline-none focus:border-blue-500"
+              />
             </div>
-            <input
-              type="text"
-              placeholder="Filter by name or UID..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-9 pr-4 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs placeholder:text-slate-500 focus:outline-none focus:border-blue-500"
-            />
+
+            <select
+              value={selectedSemester}
+              onChange={(e) => setSelectedSemester(e.target.value)}
+              className="px-3 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-blue-500"
+            >
+              {semesters.map((sem) => (
+                <option key={sem} value={sem}>
+                  {sem === 'All' ? 'All Semesters' : sem}
+                </option>
+              ))}
+            </select>
           </div>
 
-          <div className="w-full md:w-auto flex items-center gap-2 overflow-x-auto pb-1 md:pb-0">
+          <div className="w-full lg:w-auto flex items-center gap-2 overflow-x-auto pb-1 lg:pb-0">
             <Filter className="w-3.5 h-3.5 text-slate-500 shrink-0" />
             {departments.map((dept) => (
               <button
@@ -455,16 +512,20 @@ export const ReportsPage: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60">
-                {dailyRecords.length === 0 ? (
+                {periodRecords.length === 0 ? (
                   <tr>
                     <td colSpan={7} className="py-12 text-center text-slate-500">
                       <FileSpreadsheet className="w-8 h-8 mx-auto mb-2 opacity-40" />
                       <p className="text-sm font-semibold text-slate-300">No report records found</p>
-                      <p className="text-xs text-slate-500 mt-1">Try selecting another date or check your filters.</p>
+                      <p className="text-xs text-slate-500 mt-1">
+                        {reportType === 'daily'
+                          ? 'Try selecting another date or check your filters.'
+                          : `No verified records in the selected ${reportType === 'weekly' ? '7-day' : '30-day'} IST window.`}
+                      </p>
                     </td>
                   </tr>
                 ) : (
-                  dailyRecords.map((r, i) => (
+                  periodRecords.map((r, i) => (
                     <tr key={`${r.date}-${r.uid}-${i}`} className="hover:bg-slate-850/50 transition">
                       <td className="py-3.5 px-4 font-mono text-slate-300">
                         {r.date}
@@ -482,7 +543,11 @@ export const ReportsPage: React.FC = () => {
                         {r.department || '—'}
                       </td>
                       <td className="py-3.5 px-4">
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-semibold">
+                        <span className={`text-[10px] font-mono px-2 py-0.5 rounded border font-semibold ${
+                          r.status === 'Present'
+                            ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                            : 'bg-rose-500/10 text-rose-400 border-rose-500/20'
+                        }`}>
                           {r.status}
                         </span>
                       </td>

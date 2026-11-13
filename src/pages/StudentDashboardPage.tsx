@@ -22,6 +22,7 @@ import { useAuth } from '../context/AuthContext';
 import { useAttendance } from '../context/AttendanceContext';
 import { StudentTab } from '../components/StudentSidebar';
 import { lookupStudentInfo } from '../services/firebase';
+import { getISTYearMonthDay } from '../utils/dateUtils';
 
 interface StudentDashboardPageProps {
   onNavigateTab: (tab: StudentTab) => void;
@@ -29,7 +30,20 @@ interface StudentDashboardPageProps {
 
 export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNavigateTab }) => {
   const { user } = useAuth();
-  const { allAttendance, todayAttendance, refreshAttendance, isRefreshing, studentsList, suspensions } = useAttendance();
+  const {
+    allAttendance,
+    todayAttendance,
+    refreshAttendance,
+    isRefreshing,
+    studentsList,
+    suspensions,
+    applicableWorkingDates,
+    workingDays,
+    todayStr,
+    attendanceDeadline,
+    isAfterDeadline,
+    isTodayHoliday,
+  } = useAttendance();
 
   // Resilient student metadata resolution
   const resolvedInfo = useMemo(() => {
@@ -56,20 +70,13 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
     if (studentProfile?.activeSuspension && studentProfile.status === 'suspended') {
       return studentProfile.activeSuspension;
     }
-    const today = new Date().toISOString().split('T')[0];
     const studentSuspList = suspensions[studentRfid] || [];
     return studentSuspList.find(
-      (s: any) => s.status === 'active' && s.endDate >= today
+      (s: any) => s.status === 'active' && s.endDate >= todayStr
     );
-  }, [studentProfile, suspensions, studentRfid]);
+  }, [studentProfile, suspensions, studentRfid, todayStr]);
 
   const isSuspended = Boolean(activeSuspension || studentProfile?.status === 'suspended' || studentProfile?.isSuspended);
-
-  // Today's date in local and UTC formats to eliminate timezone discrepancies
-  const now = new Date();
-  const localTodayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-  const utcTodayStr = now.toISOString().split('T')[0];
-  const todayStr = localTodayStr;
 
   // Extract all attendance records for this student with resilient multi-identifier matching
   const studentRecords = useMemo(() => {
@@ -120,7 +127,7 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
             recordsMap.set(dateVal, {
               date: dateVal,
               time: item.time || '',
-              timestamp: item.timestamp || new Date(date).getTime(),
+              timestamp: item.timestamp || new Date(`${dateVal}T12:00:00+05:30`).getTime(),
               device: item.device || 'ESP32-RFID-01',
               status: item.status || 'Present',
               isOverridden: Boolean(item.isOverridden),
@@ -132,7 +139,7 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
       }
     });
 
-    // 2. Also check todayAttendance
+    // 2. Also check todayAttendance (strictly for todayStr)
     const todayCandidates = [
       studentRfid ? todayAttendance[studentRfid] : undefined,
       studentRfid ? todayAttendance[studentRfid.toLowerCase()] : undefined,
@@ -143,45 +150,35 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
     for (const item of todayCandidates) {
       if (item && isMatchingStudent(item)) {
         if (item.isDeleted) continue;
-        const dateVal = item.date || localTodayStr;
-        recordsMap.set(dateVal, {
-          date: dateVal,
-          time: item.time || '',
-          timestamp: item.timestamp || Date.now(),
-          device: item.device || 'ESP32-RFID-01',
-          status: item.status || 'Present',
-          isOverridden: Boolean(item.isOverridden),
-          overrideReason: item.overrideReason || '',
-        });
+        const dateVal = item.date || todayStr;
+        if (dateVal === todayStr) {
+          recordsMap.set(dateVal, {
+            date: dateVal,
+            time: item.time || '',
+            timestamp: item.timestamp || Date.now(),
+            device: item.device || 'ESP32-RFID-01',
+            status: item.status || 'Present',
+            isOverridden: Boolean(item.isOverridden),
+            overrideReason: item.overrideReason || '',
+          });
+        }
         break;
       }
     }
 
     return Array.from(recordsMap.values()).sort((a, b) => b.timestamp - a.timestamp);
-  }, [allAttendance, todayAttendance, studentRfid, studentAuthUid, studentEmail, studentRoll, user?.displayName, resolvedInfo?.name, localTodayStr]);
+  }, [allAttendance, todayAttendance, studentRfid, studentAuthUid, studentEmail, studentRoll, user?.displayName, resolvedInfo?.name, todayStr]);
 
-  // Total recorded institutional working days (distinct dates in allAttendance + today)
+  // Total applicable institutional working days (excludes holidays & future dates)
   const allRecordedDates = useMemo(() => {
-    const dates = new Set<string>(Object.keys(allAttendance));
-    dates.add(localTodayStr);
-    dates.add(utcTodayStr);
-    return Array.from(dates).sort();
-  }, [allAttendance, localTodayStr, utcTodayStr]);
+    return applicableWorkingDates.filter((d) => !workingDays[d]?.isHoliday && d <= todayStr);
+  }, [applicableWorkingDates, workingDays, todayStr]);
 
-  const totalWorkingDays = allRecordedDates.length;
-  const presentDays = studentRecords.filter((r) => r.status === 'Present').length;
-  const absentDays = Math.max(0, totalWorkingDays - presentDays);
-  const attendanceRate = totalWorkingDays > 0 ? Math.round((presentDays / totalWorkingDays) * 100) : 100;
-
-  // Today check-in status (matches local date, UTC date, or latest scan)
+  // Strictly match TODAY's IST record (never fall back to a past scan)
   const todayRecord = useMemo(() => {
-    // 1. Check if any record in studentRecords matches today (local or UTC)
-    const matchRecord = studentRecords.find(
-      (r) => (r.date === localTodayStr || r.date === utcTodayStr) && r.status === 'Present'
-    );
+    const matchRecord = studentRecords.find((r) => r.date === todayStr);
     if (matchRecord) return matchRecord;
 
-    // 2. Check todayAttendance candidates directly
     const todayCandidates = [
       studentRfid ? todayAttendance[studentRfid] : undefined,
       studentRfid ? todayAttendance[studentRfid.toLowerCase()] : undefined,
@@ -189,49 +186,72 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
       ...Object.values(todayAttendance),
     ];
     for (const item of todayCandidates) {
-      if (item && (
-        (studentRfid && (item.rfidUID?.toUpperCase() === studentRfid || item.uid?.toUpperCase() === studentRfid)) ||
-        (studentAuthUid && (item.authUid === studentAuthUid || item.userId === studentAuthUid))
-      ) && item.status === 'Present') {
+      if (
+        item &&
+        !item.isDeleted &&
+        (item.date === todayStr || !item.date) &&
+        ((studentRfid && (item.rfidUID?.toUpperCase() === studentRfid || item.uid?.toUpperCase() === studentRfid)) ||
+          (studentAuthUid && (item.authUid === studentAuthUid || item.userId === studentAuthUid)))
+      ) {
         return {
-          date: item.date || localTodayStr,
+          date: item.date || todayStr,
           time: item.time || '',
           timestamp: item.timestamp || Date.now(),
           device: item.device || 'ESP32-RFID-01',
           status: item.status || 'Present',
+          isOverridden: Boolean(item.isOverridden),
+          overrideReason: item.overrideReason || '',
         };
       }
     }
 
-    // 3. Fallback: check if the student has ANY record in studentRecords
-    if (studentRecords.length > 0) {
-      const latest = studentRecords[0];
-      if (latest && latest.status === 'Present') {
-        return latest;
-      }
-    }
-
     return null;
-  }, [studentRecords, todayAttendance, localTodayStr, utcTodayStr, studentRfid, studentAuthUid]);
+  }, [studentRecords, todayAttendance, todayStr, studentRfid, studentAuthUid]);
 
   const isPresentToday = Boolean(todayRecord && todayRecord.status === 'Present');
+  const isExplicitAbsentToday = Boolean(todayRecord && todayRecord.status === 'Absent');
+  const isPendingToday = !isPresentToday && !isExplicitAbsentToday && !isTodayHoliday && !isAfterDeadline;
+  const isAbsentToday = isExplicitAbsentToday || (!isPresentToday && !isTodayHoliday && isAfterDeadline);
+  const latestPresentScan = useMemo(
+    () => studentRecords.find((r) => r.status === 'Present') || null,
+    [studentRecords]
+  );
 
-  // Monthly breakdown for Chart
+  // Never classify today as absent while the attendance window is still open
+  const evaluatedWorkingDates = useMemo(() => {
+    return allRecordedDates.filter((d) => {
+      if (d < todayStr) return true;
+      if (d === todayStr) {
+        return isPresentToday || isExplicitAbsentToday || isAfterDeadline;
+      }
+      return false;
+    });
+  }, [allRecordedDates, todayStr, isPresentToday, isExplicitAbsentToday, isAfterDeadline]);
+
+  const totalWorkingDays = evaluatedWorkingDates.length;
+  const presentDays = evaluatedWorkingDates.filter((dateKey) =>
+    studentRecords.some((r) => r.date === dateKey && r.status === 'Present')
+  ).length;
+  const absentDays = Math.max(0, totalWorkingDays - presentDays);
+  const attendanceRate = totalWorkingDays > 0 ? Math.round((presentDays / totalWorkingDays) * 100) : 0;
+
+  // Monthly breakdown for Chart (IST year/month)
   const monthlyChartData = useMemo(() => {
     const monthsMap: Record<string, { month: string; Present: number; Absent: number }> = {};
     const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-    // Initialize past 4 months up to current month
-    const now = new Date();
+    const { year: istYear, month: istMonth } = getISTYearMonthDay();
     for (let i = 3; i >= 0; i--) {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-      const label = `${monthNames[d.getMonth()]} ${d.getFullYear()}`;
+      const d = new Date(Date.UTC(istYear, istMonth - 1 - i, 1));
+      const y = d.getUTCFullYear();
+      const m = d.getUTCMonth();
+      const key = `${y}-${String(m + 1).padStart(2, '0')}`;
+      const label = `${monthNames[m]} ${y}`;
       monthsMap[key] = { month: label, Present: 0, Absent: 0 };
     }
 
-    // Populate actual days
-    allRecordedDates.forEach((date) => {
+    evaluatedWorkingDates.forEach((date) => {
+      if (workingDays[date]?.isHoliday) return;
       const monthKey = date.substring(0, 7);
       if (monthsMap[monthKey]) {
         const isPresent = studentRecords.some((r) => r.date === date && r.status === 'Present');
@@ -244,7 +264,7 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
     });
 
     return Object.values(monthsMap);
-  }, [allRecordedDates, studentRecords]);
+  }, [evaluatedWorkingDates, workingDays, studentRecords]);
 
   // Donut chart data
   const donutData = useMemo(() => {
@@ -331,16 +351,17 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
             </div>
           </div>
 
-          {/* Today Check-in Status Pill */}
+          {/* Today Check-in Status Pill (Strictly IST Today) */}
           <div className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800/90 flex flex-col items-start sm:items-end justify-center">
             <span className="text-[10px] uppercase font-mono tracking-wider text-slate-400 mb-1">
-              {isPresentToday
-                ? (todayRecord?.date === localTodayStr || todayRecord?.date === utcTodayStr)
-                  ? `Today's Status (${todayRecord.date})`
-                  : `Latest Session Scan (${todayRecord?.date})`
-                : `Today's Status (${todayStr})`}
+              Today&apos;s Status ({todayStr} IST)
             </span>
-            {isPresentToday ? (
+            {isTodayHoliday ? (
+              <div className="flex items-center gap-2">
+                <span className="h-2.5 w-2.5 rounded-full bg-amber-400"></span>
+                <span className="text-sm font-bold text-amber-300">HOLIDAY</span>
+              </div>
+            ) : isPresentToday ? (
               <div className="flex items-center gap-2">
                 <span className="flex h-3 w-3 relative">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
@@ -349,17 +370,39 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
                 <span className="text-sm font-bold text-emerald-400">PRESENT</span>
                 <span className="text-xs text-slate-400 font-mono">({todayRecord?.time})</span>
               </div>
+            ) : isAbsentToday ? (
+              <div className="flex items-center gap-2">
+                <span className="h-2.5 w-2.5 rounded-full bg-rose-500"></span>
+                <span className="text-sm font-bold text-rose-400">
+                  {todayRecord?.isOverridden ? 'ABSENT (OVERRIDE)' : 'ABSENT'}
+                </span>
+              </div>
+            ) : isPendingToday ? (
+              <div className="flex items-center gap-2">
+                <span className="h-2.5 w-2.5 rounded-full bg-amber-400 animate-pulse"></span>
+                <span className="text-sm font-bold text-amber-300">PENDING</span>
+                <span className="text-[11px] text-slate-400 font-mono">(Cutoff {attendanceDeadline} IST)</span>
+              </div>
             ) : (
               <div className="flex items-center gap-2">
-                <span className="h-2.5 w-2.5 rounded-full bg-amber-400"></span>
-                <span className="text-sm font-bold text-amber-300">NOT SCANNED YET</span>
+                <span className="h-2.5 w-2.5 rounded-full bg-slate-400"></span>
+                <span className="text-sm font-bold text-slate-300">NOT SCANNED</span>
               </div>
             )}
-            <p className="text-[10px] text-slate-500 mt-1">
-              {isPresentToday
-                ? `Verified via ${todayRecord?.device || 'ESP32-RFID-01'}`
-                : 'Tap your registered RFID card at the reader'}
+            <p className="text-[10px] text-slate-400 mt-1">
+              {isTodayHoliday
+                ? workingDays[todayStr]?.label || 'Non-working institutional day'
+                : isPresentToday
+                  ? `Verified via ${todayRecord?.device || 'ESP32-RFID-01'}`
+                  : isAbsentToday
+                    ? todayRecord?.overrideReason || `Attendance window closed at ${attendanceDeadline} IST`
+                    : 'Tap your registered RFID card at the reader'}
             </p>
+            {!isPresentToday && latestPresentScan && (
+              <p className="text-[10px] font-mono text-slate-500 mt-0.5">
+                Last recorded scan: {latestPresentScan.date} at {latestPresentScan.time}
+              </p>
+            )}
             <button
               onClick={() => refreshAttendance()}
               disabled={isRefreshing}

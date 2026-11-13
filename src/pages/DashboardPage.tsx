@@ -16,7 +16,8 @@ import {
   Database,
   Wifi,
   WifiOff,
-  RefreshCw
+  RefreshCw,
+  Layers
 } from 'lucide-react';
 import { 
   ResponsiveContainer, 
@@ -31,28 +32,69 @@ import {
 } from 'recharts';
 import { useAttendance } from '../context/AttendanceContext';
 import { NavPage } from '../components/Sidebar';
+import { DatabaseMigrationModal } from '../components/DatabaseMigrationModal';
+import { getISTClockTime } from '../utils/dateUtils';
 
 interface DashboardPageProps {
   onNavigate: (page: NavPage) => void;
   onOpenScanner: () => void;
 }
 
+const AnalyticsTooltip = ({ active, payload }: any) => {
+  if (!active || !payload || !payload.length) return null;
+  const row = payload[0]?.payload;
+  if (!row) return null;
+  return (
+    <div className="p-3 rounded-xl bg-slate-900 border border-slate-700 text-xs text-slate-100 shadow-2xl space-y-1">
+      <div className="font-mono font-bold text-cyan-300 flex items-center justify-between gap-3">
+        <span>{row.date} ({row.dayName})</span>
+        {row.isHoliday && (
+          <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px]">HOLIDAY</span>
+        )}
+      </div>
+      {!row.isHoliday && (
+        <>
+          <p className="text-emerald-400 font-mono">Present: <strong>{row.present}</strong></p>
+          {typeof row.pending === 'number' && row.pending > 0 && (
+            <p className="text-amber-400 font-mono">Pending: <strong>{row.pending}</strong></p>
+          )}
+          <p className="text-rose-400 font-mono">Absent: <strong>{row.absent}</strong></p>
+          <p className="text-cyan-300 font-mono pt-1 border-t border-slate-800">
+            Attendance Rate: <strong>{row.percentage}%</strong>
+          </p>
+        </>
+      )}
+    </div>
+  );
+};
+
 export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate, onOpenScanner }) => {
   const { 
+    todayStr,
+    attendanceDeadline,
+    isAfterDeadline,
+    isTodayHoliday,
     totalStudentsCount, 
     presentTodayCount, 
-    absentTodayCount, 
+    absentTodayCount,
+    pendingTodayCount,
     todayPercentage, 
     todayRecordsList,
     weeklyStats,
     monthlyStats,
     isDbConnected,
+    lastSyncedAt,
+    isRefreshing,
+    refreshAttendance,
     dbErrorMessage,
-    retryConnection
+    retryConnection,
+    migrationInspection,
+    unregisteredRecovery
   } = useAttendance();
 
   const [activeChartTab, setActiveChartTab] = useState<'weekly' | 'monthly'>('weekly');
   const [isRetrying, setIsRetrying] = useState(false);
+  const [isMigrationOpen, setIsMigrationOpen] = useState(false);
 
   const handleRetry = async () => {
     setIsRetrying(true);
@@ -110,13 +152,39 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate, onOpen
                 {dbErrorMessage ? 'ACCESS RESTRICTED' : isDbConnected ? 'RTDB LIVE' : 'SYNCING'}
               </span>
             </div>
-            <p className="text-xs text-slate-400 mt-0.5 font-mono">
-              Host: <span className="text-cyan-400">rfid-attendance-system-5fccd-default-rtdb.firebaseio.com</span>
+            <p className="text-xs text-slate-400 mt-0.5 font-mono flex flex-wrap items-center gap-x-3 gap-y-1">
+              <span>Date (IST): <span className="text-cyan-400">{todayStr}</span></span>
+              <span>•</span>
+              <span>
+                Cutoff: <span className="text-slate-200">{attendanceDeadline} IST</span>{' '}
+                {isTodayHoliday ? (
+                  <span className="text-amber-400">(Holiday)</span>
+                ) : isAfterDeadline ? (
+                  <span className="text-rose-400">(Window Closed)</span>
+                ) : (
+                  <span className="text-emerald-400">(Window Open)</span>
+                )}
+              </span>
+              {lastSyncedAt && (
+                <>
+                  <span>•</span>
+                  <span>Last Synced: <span className="text-slate-200">{getISTClockTime(lastSyncedAt)}</span></span>
+                </>
+              )}
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-2.5">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <button
+            onClick={() => refreshAttendance()}
+            disabled={isRefreshing}
+            className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+            title="Force immediate synchronization with Firebase RTDB"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 text-cyan-400 ${isRefreshing ? 'animate-spin' : ''}`} />
+            <span>{isRefreshing ? 'Syncing...' : 'Sync Now'}</span>
+          </button>
           <button
             onClick={() => onNavigate('attendance')}
             className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md shadow-blue-600/30 transition flex items-center gap-1.5 cursor-pointer"
@@ -160,10 +228,38 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate, onOpen
         </div>
       )}
 
-      {/* 4 Key Metrics Cards (Calculated strictly from actual database records) */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+      {/* Legacy Database Migration / Recovery Notice Banner */}
+      {(migrationInspection?.hasLegacyAttendance || unregisteredRecovery.length > 0) && (
+        <div className="p-4 rounded-2xl bg-gradient-to-r from-amber-950/40 via-slate-900 to-cyan-950/30 border border-amber-500/40 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg">
+          <div className="flex items-start gap-3">
+            <div className="w-9 h-9 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
+              <Layers className="w-4 h-4" />
+            </div>
+            <div>
+              <p className="font-bold text-amber-200">
+                {migrationInspection?.hasLegacyAttendance
+                  ? `Legacy /attendance Data Detected (${migrationInspection.legacyRecordCount} records)`
+                  : `Unregistered Card Recovery Pending (${unregisteredRecovery.length} cards)`}
+              </p>
+              <p className="text-[11px] text-slate-300 mt-0.5">
+                Merge remaining records safely into the unified <code className="font-mono text-cyan-300">students/&#123;UID&#125;/attendance/</code> structure with automatic backup &amp; verification.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => setIsMigrationOpen(true)}
+            className="px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold shadow transition cursor-pointer shrink-0 flex items-center gap-1.5"
+          >
+            <Database className="w-3.5 h-3.5" />
+            <span>Open Migration Center</span>
+          </button>
+        </div>
+      )}
+
+      {/* 5 Key Metrics Cards (Calculated strictly from active students & IST attendance window) */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
         
-        {/* Total Students */}
+        {/* Total Active Students */}
         <div 
           onClick={() => onNavigate('students')}
           className="p-5 rounded-2xl bg-[#0c1220]/90 backdrop-blur-xl border border-slate-800/80 hover:border-blue-500/40 transition cursor-pointer group shadow-lg"
@@ -180,12 +276,12 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate, onOpen
             <span className="text-2xl font-black text-white font-mono">
               {totalStudentsCount}
             </span>
-            <span className="text-xs text-blue-400 font-medium">In Database</span>
+            <span className="text-xs text-blue-400 font-medium">Active</span>
           </div>
           <div className="mt-3 flex items-center justify-between text-[11px] text-slate-400 pt-3 border-t border-slate-800/80">
-            <span>Registered in Firebase</span>
+            <span>Registered &amp; Active</span>
             <span className="text-blue-400 group-hover:translate-x-0.5 transition flex items-center">
-              View Students <ChevronRight className="w-3 h-3" />
+              View <ChevronRight className="w-3 h-3" />
             </span>
           </div>
         </div>
@@ -207,12 +303,41 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate, onOpen
             <span className="text-2xl font-black text-emerald-400 font-mono">
               {presentTodayCount}
             </span>
-            <span className="text-xs text-emerald-400/80 font-medium">Actual Scans</span>
+            <span className="text-xs text-emerald-400/80 font-medium">Verified Scans</span>
           </div>
           <div className="mt-3 flex items-center justify-between text-[11px] text-slate-400 pt-3 border-t border-slate-800/80">
-            <span>Verified Database Taps</span>
+            <span>{todayStr}</span>
             <span className="text-emerald-400 group-hover:translate-x-0.5 transition flex items-center">
-              View Feed <ChevronRight className="w-3 h-3" />
+              Feed <ChevronRight className="w-3 h-3" />
+            </span>
+          </div>
+        </div>
+
+        {/* Pending Today (Window Open) */}
+        <div 
+          onClick={() => onNavigate('attendance')}
+          className="p-5 rounded-2xl bg-[#0c1220]/90 backdrop-blur-xl border border-slate-800/80 hover:border-amber-500/40 transition cursor-pointer group shadow-lg"
+        >
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">
+              Pending
+            </span>
+            <div className="w-9 h-9 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 group-hover:scale-105 transition">
+              <Clock className="w-4 h-4" />
+            </div>
+          </div>
+          <div className="flex items-baseline gap-2">
+            <span className="text-2xl font-black text-amber-400 font-mono">
+              {pendingTodayCount}
+            </span>
+            <span className="text-xs text-amber-400/80 font-medium">
+              {isTodayHoliday ? 'Holiday' : isAfterDeadline ? 'Closed' : `Until ${attendanceDeadline}`}
+            </span>
+          </div>
+          <div className="mt-3 flex items-center justify-between text-[11px] text-slate-400 pt-3 border-t border-slate-800/80">
+            <span>{isAfterDeadline ? 'Cutoff Passed' : 'Awaiting RFID Tap'}</span>
+            <span className="text-amber-400 group-hover:translate-x-0.5 transition flex items-center">
+              Details <ChevronRight className="w-3 h-3" />
             </span>
           </div>
         </div>
@@ -234,12 +359,14 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate, onOpen
             <span className="text-2xl font-black text-rose-400 font-mono">
               {absentTodayCount}
             </span>
-            <span className="text-xs text-rose-400/80 font-medium">Pending Taps</span>
+            <span className="text-xs text-rose-400/80 font-medium">
+              {isTodayHoliday ? 'Holiday' : isAfterDeadline ? 'Post-Deadline' : 'Overrides'}
+            </span>
           </div>
           <div className="mt-3 flex items-center justify-between text-[11px] text-slate-400 pt-3 border-t border-slate-800/80">
-            <span>Not Scanned Today</span>
+            <span>{isAfterDeadline ? `After ${attendanceDeadline} IST` : 'Confirmed Absent'}</span>
             <span className="text-rose-400 group-hover:translate-x-0.5 transition flex items-center">
-              Check Status <ChevronRight className="w-3 h-3" />
+              Status <ChevronRight className="w-3 h-3" />
             </span>
           </div>
         </div>
@@ -258,7 +385,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate, onOpen
             <span className="text-2xl font-black text-cyan-300 font-mono">
               {todayPercentage}%
             </span>
-            <span className="text-xs text-slate-400">of Enrolled Students</span>
+            <span className="text-xs text-slate-400">of Active</span>
           </div>
           <div className="mt-3 pt-3 border-t border-slate-800/80">
             <div className="w-full h-2 rounded-full bg-slate-800 overflow-hidden">
@@ -283,7 +410,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate, onOpen
                 <span>Attendance Analytics</span>
               </h3>
               <p className="text-xs text-slate-400 mt-0.5">
-                Plotted from actual Realtime Database records in <code className="text-cyan-300 font-mono">attendance/*</code>
+                Plotted from unified Realtime Database records in <code className="text-cyan-300 font-mono">students/*/attendance</code>
               </p>
             </div>
 
@@ -313,28 +440,24 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate, onOpen
 
           {/* Chart Display */}
           <div className="h-72 w-full">
-            {activeChartTab === 'weekly' ? (
+            {totalStudentsCount === 0 ? (
+              <div className="h-full flex flex-col items-center justify-center text-center p-6 rounded-2xl bg-slate-950/60 border border-dashed border-slate-800">
+                <Activity className="w-8 h-8 text-slate-600 mb-2" />
+                <p className="text-xs font-semibold text-slate-300">No Active Registered Students Yet</p>
+                <p className="text-[11px] text-slate-500 mt-1 max-w-xs">
+                  Register or activate students to visualize 7-day weekly and 30-day monthly attendance analytics.
+                </p>
+              </div>
+            ) : activeChartTab === 'weekly' ? (
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={weeklyStats} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
                   <XAxis dataKey="dayName" stroke="#64748b" fontSize={11} tickLine={false} />
-                  <YAxis stroke="#64748b" fontSize={11} tickLine={false} />
-                  <Tooltip 
-                    contentStyle={{ 
-                      backgroundColor: '#0f172a', 
-                      borderColor: '#334155',
-                      borderRadius: '12px',
-                      color: '#f8fafc',
-                      fontSize: '12px',
-                      boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.5)'
-                    }} 
-                    formatter={(value: any, name: any) => [
-                      value,
-                      name === 'present' ? 'Present Students' : 'Absent Students'
-                    ]}
-                  />
+                  <YAxis stroke="#64748b" fontSize={11} tickLine={false} allowDecimals={false} />
+                  <Tooltip content={<AnalyticsTooltip />} />
                   <Bar dataKey="present" fill="#3b82f6" radius={[6, 6, 0, 0]} name="present" />
-                  <Bar dataKey="absent" fill="#334155" radius={[6, 6, 0, 0]} name="absent" />
+                  <Bar dataKey="pending" fill="#f59e0b" radius={[6, 6, 0, 0]} name="pending" />
+                  <Bar dataKey="absent" fill="#475569" radius={[6, 6, 0, 0]} name="absent" />
                 </BarChart>
               </ResponsiveContainer>
             ) : (
@@ -348,16 +471,8 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate, onOpen
                   </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
                   <XAxis dataKey="dayName" stroke="#64748b" fontSize={10} tickLine={false} />
-                  <YAxis stroke="#64748b" fontSize={11} tickLine={false} />
-                  <Tooltip 
-                    contentStyle={{ 
-                      backgroundColor: '#0f172a', 
-                      borderColor: '#334155',
-                      borderRadius: '12px',
-                      color: '#f8fafc',
-                      fontSize: '12px'
-                    }} 
-                  />
+                  <YAxis stroke="#64748b" fontSize={11} tickLine={false} domain={[0, 100]} />
+                  <Tooltip content={<AnalyticsTooltip />} />
                   <Area 
                     type="monotone" 
                     dataKey="percentage" 
@@ -372,13 +487,26 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate, onOpen
             )}
           </div>
 
-          <div className="mt-auto pt-4 border-t border-slate-800/80 flex items-center justify-between text-xs text-slate-400">
-            <span className="flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-sm bg-blue-500" /> Present
-              <span className="w-2.5 h-2.5 rounded-sm bg-slate-700 ml-2" /> Absent
-            </span>
+          <div className="mt-auto pt-4 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
+            {activeChartTab === 'weekly' ? (
+              <span className="flex flex-wrap items-center gap-3">
+                <span className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-blue-500" /> Present
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-amber-500" /> Pending
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-slate-600" /> Absent
+                </span>
+              </span>
+            ) : (
+              <span className="flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-sm bg-cyan-500" /> Daily Attendance Rate (%)
+              </span>
+            )}
             <span className="font-mono text-[11px] text-slate-400">
-              Synced with Firebase node: attendance/
+              IST Calendar • students/*/attendance
             </span>
           </div>
         </div>
@@ -476,6 +604,11 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate, onOpen
           </button>
         </div>
       </div>
+
+      <DatabaseMigrationModal
+        isOpen={isMigrationOpen}
+        onClose={() => setIsMigrationOpen(false)}
+      />
     </div>
   );
 };

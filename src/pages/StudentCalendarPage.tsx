@@ -13,12 +13,24 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { useAttendance } from '../context/AttendanceContext';
 import { lookupStudentInfo } from '../services/firebase';
+import { formatISTDateFull, getISTYearMonthDay } from '../utils/dateUtils';
 
 export const StudentCalendarPage: React.FC = () => {
   const { user } = useAuth();
-  const { allAttendance, todayAttendance } = useAttendance();
+  const {
+    allAttendance,
+    todayAttendance,
+    workingDays,
+    applicableWorkingDates,
+    todayStr,
+    isAfterDeadline,
+    attendanceDeadline,
+  } = useAttendance();
 
-  const [currentDate, setCurrentDate] = useState(() => new Date());
+  const [currentDate, setCurrentDate] = useState(() => {
+    const { year: istY, month: istM } = getISTYearMonthDay();
+    return new Date(istY, istM - 1, 1);
+  });
   const [selectedDayStr, setSelectedDayStr] = useState<string | null>(null);
 
   const resolvedInfo = useMemo(() => {
@@ -46,27 +58,28 @@ export const StudentCalendarPage: React.FC = () => {
     setCurrentDate(new Date(year, month + 1, 1));
   };
 
-  const todayStr = useMemo(() => new Date().toISOString().split('T')[0], []);
-
   // Compute days in month and starting day of week
   const daysInMonth = new Date(year, month + 1, 0).getDate();
   const firstDayIndex = new Date(year, month, 1).getDay();
 
-  // All recorded dates in the entire system
+  // All applicable recorded dates in the system (excluding holidays & future dates)
   const allRecordedDates = useMemo(() => {
-    const dates = new Set<string>(Object.keys(allAttendance));
-    dates.add(todayStr);
-    return dates;
-  }, [allAttendance, todayStr]);
+    return new Set<string>(
+      applicableWorkingDates.filter((d) => !workingDays[d]?.isHoliday && d <= todayStr)
+    );
+  }, [applicableWorkingDates, workingDays, todayStr]);
 
   // Lookup helper for any given day
   const getDayAttendance = (dayNum: number) => {
     const dStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
-    const isRecordedDate = allRecordedDates.has(dStr);
+    const isHoliday = Boolean(workingDays[dStr]?.isHoliday);
+    const holidayLabel = workingDays[dStr]?.label || 'Holiday';
+    const isRecordedDate = !isHoliday && allRecordedDates.has(dStr);
     const isToday = dStr === todayStr;
     const isFuture = dStr > todayStr;
 
     let isPresent = false;
+    let isExplicitAbsent = false;
     let time = '--:--:--';
     let device = 'ESP32-RFID-01';
 
@@ -90,11 +103,17 @@ export const StudentCalendarPage: React.FC = () => {
         ...Object.values(allAttendance[dStr]),
       ];
       for (const rec of candidates) {
-        if (rec && isMatchingStudent(rec) && rec.status === 'Present') {
-          isPresent = true;
-          time = rec.time || '--:--:--';
-          device = rec.device || device;
-          break;
+        if (rec && !rec.isDeleted && isMatchingStudent(rec)) {
+          if (rec.status === 'Present') {
+            isPresent = true;
+            time = rec.time || '--:--:--';
+            device = rec.device || device;
+            break;
+          } else if (rec.status === 'Absent') {
+            isExplicitAbsent = true;
+            time = rec.time || '--:--:--';
+            device = rec.device || device;
+          }
         }
       }
     }
@@ -107,41 +126,52 @@ export const StudentCalendarPage: React.FC = () => {
         ...Object.values(todayAttendance),
       ];
       for (const rec of todayCandidates) {
-        if (rec && isMatchingStudent(rec) && rec.status === 'Present') {
-          isPresent = true;
-          time = rec.time || '--:--:--';
-          device = rec.device || device;
-          break;
+        if (rec && !rec.isDeleted && isMatchingStudent(rec)) {
+          if (rec.status === 'Present') {
+            isPresent = true;
+            time = rec.time || '--:--:--';
+            device = rec.device || device;
+            break;
+          } else if (rec.status === 'Absent') {
+            isExplicitAbsent = true;
+            time = rec.time || '--:--:--';
+            device = rec.device || device;
+          }
         }
       }
     }
 
+    const isPending = isToday && !isHoliday && !isPresent && !isExplicitAbsent && !isAfterDeadline;
+
     return {
       dateStr: dStr,
+      isHoliday,
+      holidayLabel,
       isRecordedDate,
       isToday,
       isFuture,
       isPresent,
+      isPending,
       time,
       device,
     };
   };
 
-  // Monthly summary stats
+  // Monthly summary stats (holidays and pending today excluded from absent)
   const monthlyStats = useMemo(() => {
     let present = 0;
     let absent = 0;
     for (let d = 1; d <= daysInMonth; d++) {
       const info = getDayAttendance(d);
-      if (!info.isFuture && info.isRecordedDate) {
+      if (!info.isFuture && !info.isHoliday && info.isRecordedDate && !info.isPending) {
         if (info.isPresent) present++;
         else absent++;
       }
     }
     const total = present + absent;
-    const percentage = total > 0 ? Math.round((present / total) * 100) : 100;
+    const percentage = total > 0 ? Math.round((present / total) * 100) : 0;
     return { present, absent, total, percentage };
-  }, [year, month, daysInMonth, allRecordedDates, studentRfid, allAttendance, todayAttendance]);
+  }, [year, month, daysInMonth, allRecordedDates, workingDays, studentRfid, allAttendance, todayAttendance, isAfterDeadline]);
 
   // Selected date details
   const selectedDayInfo = useMemo(() => {
@@ -149,7 +179,7 @@ export const StudentCalendarPage: React.FC = () => {
     const parts = selectedDayStr.split('-');
     const dayNum = parseInt(parts[2], 10);
     return getDayAttendance(dayNum);
-  }, [selectedDayStr, year, month, allRecordedDates, studentRfid, allAttendance, todayAttendance]);
+  }, [selectedDayStr, year, month, allRecordedDates, workingDays, studentRfid, allAttendance, todayAttendance]);
 
   const monthNames = [
     'January', 'February', 'March', 'April', 'May', 'June',
@@ -185,6 +215,10 @@ export const StudentCalendarPage: React.FC = () => {
               <span className="w-2.5 h-2.5 rounded-full bg-rose-500" />
               <span className="text-slate-300">Absent</span>
             </div>
+            <div className="flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-full bg-amber-400" />
+              <span className="text-slate-300">Holiday</span>
+            </div>
           </div>
 
           <div className="flex items-center gap-1 bg-slate-900 border border-slate-800 rounded-xl p-1">
@@ -196,7 +230,10 @@ export const StudentCalendarPage: React.FC = () => {
               <ChevronLeft className="w-4 h-4" />
             </button>
             <button
-              onClick={() => setCurrentDate(new Date())}
+              onClick={() => {
+                const { year: istY, month: istM } = getISTYearMonthDay();
+                setCurrentDate(new Date(istY, istM - 1, 1));
+              }}
               className="px-2.5 py-1 text-xs font-semibold text-slate-300 hover:text-white hover:bg-slate-800 rounded-lg transition cursor-pointer"
             >
               Current
@@ -267,7 +304,23 @@ export const StudentCalendarPage: React.FC = () => {
                 cellStyle = 'bg-blue-950/20 border-blue-500/40 text-blue-300 ring-1 ring-blue-500/30';
               }
 
-              if (!info.isFuture && info.isRecordedDate) {
+              if (info.isHoliday) {
+                cellStyle = 'bg-amber-950/20 border-amber-500/35 text-amber-200 hover:border-amber-400';
+                badge = (
+                  <span className="inline-flex items-center gap-0.5 text-[10px] font-mono text-amber-300 font-bold">
+                    <span className="hidden sm:inline">HOLIDAY</span>
+                    <span className="sm:hidden">HOL</span>
+                  </span>
+                );
+              } else if (info.isPending) {
+                cellStyle = 'bg-amber-950/20 border-amber-500/40 text-amber-200 hover:border-amber-400';
+                badge = (
+                  <span className="inline-flex items-center gap-0.5 text-[10px] font-mono text-amber-300 font-bold">
+                    <Clock className="w-3 h-3" />
+                    <span className="hidden sm:inline">PENDING</span>
+                  </span>
+                );
+              } else if (!info.isFuture && info.isRecordedDate) {
                 if (info.isPresent) {
                   cellStyle = 'bg-emerald-950/25 border-emerald-500/40 text-emerald-200 hover:border-emerald-400';
                   badge = (
@@ -335,20 +388,31 @@ export const StudentCalendarPage: React.FC = () => {
                     {selectedDayInfo.dateStr}
                   </p>
                   <p className="text-xs text-slate-400">
-                    {new Date(selectedDayInfo.dateStr).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+                    {formatISTDateFull(selectedDayInfo.dateStr)}
                   </p>
                 </div>
 
                 <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
                   <div className="flex items-center justify-between">
                     <span className="text-xs text-slate-400">Status</span>
-                    {selectedDayInfo.isPresent ? (
+                    {selectedDayInfo.isHoliday ? (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-500/15 text-amber-300 font-semibold text-xs border border-amber-500/30">
+                        <span>Holiday ({selectedDayInfo.holidayLabel})</span>
+                      </span>
+                    ) : selectedDayInfo.isPresent ? (
                       <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 font-semibold text-xs border border-emerald-500/20">
                         <CheckCircle2 className="w-3.5 h-3.5" />
                         <span>Present</span>
                       </span>
+                    ) : selectedDayInfo.isPending ? (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-500/10 text-amber-300 font-semibold text-xs border border-amber-500/25">
+                        <Clock className="w-3.5 h-3.5" />
+                        <span>Pending (Until {attendanceDeadline} IST)</span>
+                      </span>
                     ) : selectedDayInfo.isFuture ? (
                       <span className="text-xs text-slate-500 font-mono">Upcoming</span>
+                    ) : !selectedDayInfo.isRecordedDate ? (
+                      <span className="text-xs text-slate-400 font-mono">No Working Day Logged</span>
                     ) : (
                       <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-rose-500/10 text-rose-400 font-semibold text-xs border border-rose-500/20">
                         <XCircle className="w-3.5 h-3.5" />

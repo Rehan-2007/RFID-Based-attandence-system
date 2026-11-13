@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { X, Edit2, Calendar, Clock, CheckCircle2, History, AlertCircle, Save, RotateCcw } from 'lucide-react';
 import { AttendanceRecord, AttendanceStatus } from '../types';
 import { useAttendance } from '../context/AttendanceContext';
+import { getISTTimestampDisplay } from '../utils/dateUtils';
 
 interface EditAttendanceModalProps {
   record: AttendanceRecord | null;
@@ -288,7 +289,7 @@ export const EditAttendanceModal: React.FC<EditAttendanceModalProps> = ({
                       Reason: <span className="text-slate-300">{item.reason || 'None provided'}</span>
                     </p>
                     <p className="text-[10px] text-slate-500 font-mono">
-                      Edited by {item.editedBy} • {new Date(item.editedAt).toLocaleString()}
+                      Edited by {item.editedBy} • {getISTTimestampDisplay(item.editedAt)}
                     </p>
                   </div>
 

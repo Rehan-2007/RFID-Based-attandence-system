@@ -57,8 +57,7 @@ service cloud.firestore {
             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.rfidUID == resource.data.uid))
         )
       );
-      allow create, update: if isAdmin() || isAuthenticated();
-      allow delete: if isAdmin();
+      allow write: if isAdmin();
     }
   }
 }

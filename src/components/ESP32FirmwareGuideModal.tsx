@@ -122,50 +122,52 @@ void loop() {
   strftime(timeStr, sizeof(timeStr), "%H:%M:%S", &timeinfo);
 
   // -------------------------------------------------------------
-  // STEP 1: VERIFY STUDENT SUSPENSION STATUS
-  // Check /students/{CARD_UID}/isSuspended
+  // STEP 1: VERIFY REGISTERED ACTIVE STUDENT & SUSPENSION STATUS
+  // Check /students/{CARD_UID}/status & /students/{CARD_UID}/isSuspended
   // -------------------------------------------------------------
+  String statusPath = "/students/" + cardUID + "/status";
+  if (!Firebase.RTDB.getString(&fbdo, statusPath) || fbdo.stringData() != "active") {
+    Serial.println("ACCESS DENIED: Unregistered, inactive, or suspended student.");
+    beepDenied();
+    rfid.PICC_HaltA();
+    return;
+  }
+
   String suspPath = "/students/" + cardUID + "/isSuspended";
-  if (Firebase.RTDB.getBool(&fbdo, suspPath)) {
-    if (fbdo.boolData() == true) {
-      Serial.println("ACCESS DENIED: Student is SUSPENDED. Attendance rejected.");
-      beepDenied();
-      rfid.PICC_HaltA();
-      return;
-    }
+  if (Firebase.RTDB.getBool(&fbdo, suspPath) && fbdo.boolData() == true) {
+    Serial.println("ACCESS DENIED: Student is SUSPENDED. Attendance rejected.");
+    beepDenied();
+    rfid.PICC_HaltA();
+    return;
   }
 
   // -------------------------------------------------------------
   // STEP 2: CHECK ADMINISTRATIVE OVERRIDE LOCK
   // Check if admin manually marked Absent for today:
-  // /attendance/{DATE}/{CARD_UID}/isOverridden
+  // /students/{CARD_UID}/attendance/{DATE}/isOverridden
   // -------------------------------------------------------------
-  String overridePath = "/attendance/" + String(dateStr) + "/" + cardUID + "/isOverridden";
-  if (Firebase.RTDB.getBool(&fbdo, overridePath)) {
-    if (fbdo.boolData() == true) {
-      Serial.println("ATTENDANCE LOCKED: Admin marked Absent. Subsequent scans blocked.");
-      beepDenied();
-      rfid.PICC_HaltA();
-      return;
-    }
+  String overridePath = "/students/" + cardUID + "/attendance/" + String(dateStr) + "/isOverridden";
+  if (Firebase.RTDB.getBool(&fbdo, overridePath) && fbdo.boolData() == true) {
+    Serial.println("ATTENDANCE LOCKED: Admin marked Absent. Subsequent scans blocked.");
+    beepDenied();
+    rfid.PICC_HaltA();
+    return;
   }
 
   // -------------------------------------------------------------
   // STEP 3: PREVENT DUPLICATE SCANS ON SAME DAY
   // -------------------------------------------------------------
-  String checkPath = "/attendance/" + String(dateStr) + "/" + cardUID + "/status";
-  if (Firebase.RTDB.getString(&fbdo, checkPath)) {
-    if (fbdo.stringData() == "Present") {
-      Serial.println("DUPLICATE TAP: Student already marked Present today.");
-      beepSuccess(); // Normal chime for acknowledged tap
-      rfid.PICC_HaltA();
-      return;
-    }
+  String checkPath = "/students/" + cardUID + "/attendance/" + String(dateStr) + "/status";
+  if (Firebase.RTDB.getString(&fbdo, checkPath) && fbdo.stringData() == "Present") {
+    Serial.println("DUPLICATE TAP: Student already marked Present today.");
+    beepSuccess();
+    rfid.PICC_HaltA();
+    return;
   }
 
   // -------------------------------------------------------------
-  // STEP 4: RECORD PRESENT ATTENDANCE
-  // Write to /attendance/{DATE}/{CARD_UID}
+  // STEP 4: RECORD PRESENT ATTENDANCE IN UNIFIED STUDENT NODE
+  // Write to /students/{CARD_UID}/attendance/{DATE}
   // -------------------------------------------------------------
   FirebaseJson json;
   json.set("uid", cardUID);
@@ -175,9 +177,9 @@ void loop() {
   json.set("status", "Present");
   json.set("device", "ESP32-HARDWARE-01");
 
-  String writePath = "/attendance/" + String(dateStr) + "/" + cardUID;
+  String writePath = "/students/" + cardUID + "/attendance/" + String(dateStr);
   if (Firebase.RTDB.setJSON(&fbdo, writePath, &json)) {
-    Serial.println("Attendance Recorded Successfully!");
+    Serial.println("Attendance Recorded Successfully at " + writePath);
     beepSuccess();
   } else {
     Serial.println("Firebase write failed: " + fbdo.errorReason());
@@ -244,7 +246,7 @@ void loop() {
                 <span>2. Admin Lock Check</span>
               </div>
               <p className="text-slate-400 text-[11px] leading-relaxed">
-                Queries <code className="text-rose-300 font-mono">attendance/{'{DATE}'}/{'{UID}'}/isOverridden</code>. If locked as Absent, prevents RFID override.
+                Queries <code className="text-rose-300 font-mono">students/{'{UID}'}/attendance/{'{DATE}'}/isOverridden</code>. If locked as Absent, prevents RFID override.
               </p>
             </div>
 
@@ -254,7 +256,7 @@ void loop() {
                 <span>3. Realtime Push</span>
               </div>
               <p className="text-slate-400 text-[11px] leading-relaxed">
-                Writes to <code className="text-emerald-300 font-mono">attendance/{'{DATE}'}/{'{UID}'}</code>. Instantly updates Admin & Student Portals.
+                Writes directly to <code className="text-emerald-300 font-mono">students/{'{UID}'}/attendance/{'{DATE}'}</code>. Instantly updates Admin &amp; Student Portals.
               </p>
             </div>
           </div>

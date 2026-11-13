@@ -28,7 +28,8 @@ import {
   ChevronDown,
   ChevronUp,
   RefreshCw,
-  X
+  X,
+  Layers
 } from 'lucide-react';
 import { AttendanceRecord, AttendanceStatus, Student, TrashAttendanceRecord, AuditActivityLog } from '../types';
 import { useAttendance } from '../context/AttendanceContext';
@@ -38,6 +39,8 @@ import { DeleteConfirmationModal } from '../components/DeleteConfirmationModal';
 import { BulkStatusModal } from '../components/BulkStatusModal';
 import { StudentSuspensionModal } from '../components/StudentSuspensionModal';
 import { ESP32FirmwareGuideModal } from '../components/ESP32FirmwareGuideModal';
+import { DatabaseMigrationModal } from '../components/DatabaseMigrationModal';
+import { getISTTimestampDisplay } from '../utils/dateUtils';
 
 interface AttendancePageProps {
   onOpenScanner: () => void;
@@ -60,13 +63,23 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
     suspensions,
     restoreTrashRecord,
     refreshAttendance,
-    isRefreshing
+    isRefreshing,
+    workingDays,
+    toggleHolidayDate,
+    migrationInspection,
+    unregisteredRecovery,
+    todayStr,
+    pendingTodayCount,
+    attendanceDeadline,
+    isAfterDeadline,
+    isTodayHoliday
   } = useAttendance();
 
-  const todayStr = useMemo(() => new Date().toISOString().split('T')[0], []);
   const [selectedDate, setSelectedDate] = useState(todayStr);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'All' | AttendanceStatus>('All');
+  const [selectedDept, setSelectedDept] = useState('All');
+  const [selectedSemester, setSelectedSemester] = useState('All');
   const [activeTab, setActiveTab] = useState<'records' | 'trash' | 'audit' | 'security'>('records');
 
   // Multi-select for Bulk Operations
@@ -80,6 +93,7 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
   const [isBulkStatusModalOpen, setIsBulkStatusModalOpen] = useState(false);
   const [suspensionTargetStudent, setSuspensionTargetStudent] = useState<Student | null>(null);
   const [isFirmwareGuideOpen, setIsFirmwareGuideOpen] = useState(false);
+  const [isMigrationModalOpen, setIsMigrationModalOpen] = useState(false);
 
   // Manual Check-in Modal
   const [isManualModalOpen, setIsManualModalOpen] = useState(false);
@@ -102,25 +116,66 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
     return Array.from(map.values()).sort((a, b) => b.timestamp - a.timestamp);
   }, [selectedDate, todayStr, todayRecordsList, allAttendance]);
 
+  // Unique departments & semesters from student directory
+  const availableDepts = useMemo(() => {
+    const set = new Set<string>();
+    Object.values(students).forEach((s) => {
+      if (s.department) set.add(s.department);
+    });
+    return ['All', ...Array.from(set).sort()];
+  }, [students]);
+
+  const availableSemesters = useMemo(() => {
+    const set = new Set<string>();
+    Object.values(students).forEach((s) => {
+      if (s.semester) set.add(s.semester);
+    });
+    return ['All', ...Array.from(set).sort()];
+  }, [students]);
+
+  const isSelectedHoliday = Boolean(workingDays[selectedDate]?.isHoliday);
+  const hasMigrationActionNeeded = Boolean(
+    migrationInspection?.hasLegacyAttendance || unregisteredRecovery.length > 0
+  );
+
   // Filtered list
   const filteredRecords = useMemo(() => {
     return recordsForDate.filter((rec) => {
       const q = searchQuery.toLowerCase().trim();
-      const name = rec.studentName || students[rec.uid]?.name || '';
+      const student = students[rec.uid];
+      const name = rec.studentName || student?.name || '';
+      const dept = rec.department || student?.department || '';
+      const semester = student?.semester || '';
+
       const matchesSearch = 
+        !q ||
         name.toLowerCase().includes(q) ||
         rec.uid.toLowerCase().includes(q) ||
         (rec.studentId && rec.studentId.toLowerCase().includes(q));
 
       const matchesStatus = statusFilter === 'All' || rec.status === statusFilter;
+      const matchesDept = selectedDept === 'All' || dept === selectedDept;
+      const matchesSemester = selectedSemester === 'All' || semester === selectedSemester;
 
-      return matchesSearch && matchesStatus;
+      return matchesSearch && matchesStatus && matchesDept && matchesSemester;
     });
-  }, [recordsForDate, searchQuery, statusFilter, students]);
+  }, [recordsForDate, searchQuery, statusFilter, selectedDept, selectedSemester, students]);
 
-  // Stats for selected date
-  const presentCountForDate = recordsForDate.filter((r) => r.status === 'Present').length;
-  const absentCountForDate = recordsForDate.filter((r) => r.status === 'Absent').length;
+  // Stats for selected date (counting active students accurately)
+  const activeUidSet = useMemo(() => {
+    return new Set(
+      Object.values(students)
+        .filter((s) => s.status === 'active' && !s.isSuspended)
+        .map((s) => s.uid.toUpperCase())
+    );
+  }, [students]);
+
+  const presentCountForDate = recordsForDate.filter(
+    (r) => r.status === 'Present' && activeUidSet.has(r.uid.toUpperCase())
+  ).length;
+  const absentCountForDate = recordsForDate.filter(
+    (r) => r.status === 'Absent' && activeUidSet.has(r.uid.toUpperCase())
+  ).length;
   const percentageForDate = totalStudentsCount > 0 
     ? Math.round((presentCountForDate / totalStudentsCount) * 100) 
     : 0;
@@ -214,6 +269,24 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
           </button>
 
           <button
+            onClick={() => setIsMigrationModalOpen(true)}
+            className={`px-3 py-2 rounded-xl text-xs font-semibold border transition flex items-center gap-1.5 cursor-pointer ${
+              hasMigrationActionNeeded
+                ? 'bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border-amber-500/40'
+                : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
+            }`}
+            title="Inspect unified database schema, backup & migration center"
+          >
+            <Layers className={`w-3.5 h-3.5 ${hasMigrationActionNeeded ? 'text-amber-400' : 'text-emerald-400'}`} />
+            <span>DB Migration</span>
+            {hasMigrationActionNeeded && (
+              <span className="px-1.5 py-0.2 rounded-full bg-amber-500 text-slate-950 font-mono text-[10px] font-bold">
+                {(migrationInspection?.legacyRecordCount || 0) + unregisteredRecovery.length}
+              </span>
+            )}
+          </button>
+
+          <button
             onClick={() => setIsFirmwareGuideOpen(true)}
             className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-300 text-xs font-semibold border border-cyan-500/30 transition flex items-center gap-1.5 cursor-pointer"
           >
@@ -243,9 +316,16 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Date Selector */}
         <div className="p-4 rounded-2xl bg-[#0c1220]/90 backdrop-blur-xl border border-slate-800/80 shadow-lg">
-          <label className="text-[11px] font-mono text-slate-400 uppercase tracking-wider block mb-1.5">
-            Select Attendance Date
-          </label>
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="text-[11px] font-mono text-slate-400 uppercase tracking-wider">
+              Select Attendance Date
+            </label>
+            {isSelectedHoliday && (
+              <span className="px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[10px] font-mono font-bold">
+                HOLIDAY
+              </span>
+            )}
+          </div>
           <div className="relative">
             <input
               type="date"
@@ -257,12 +337,30 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
               className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono text-xs focus:outline-none focus:border-blue-500"
             />
           </div>
-          {selectedDate === todayStr && (
-            <span className="text-[10px] text-emerald-400 font-mono mt-1 flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-              Live Active Session
-            </span>
-          )}
+          <div className="mt-2 flex items-center justify-between gap-2">
+            {selectedDate === todayStr ? (
+              <span className="text-[10px] text-emerald-400 font-mono flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                Live Active Session
+              </span>
+            ) : (
+              <span className="text-[10px] text-slate-500 font-mono">
+                {isSelectedHoliday ? 'Excluded from % denominator' : 'Working Day'}
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={() => toggleHolidayDate(selectedDate, !isSelectedHoliday)}
+              className={`px-2 py-1 rounded-lg text-[10px] font-semibold border transition cursor-pointer ${
+                isSelectedHoliday
+                  ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/25'
+                  : 'bg-amber-500/10 text-amber-300 border-amber-500/30 hover:bg-amber-500/20'
+              }`}
+              title={isSelectedHoliday ? 'Mark as Institutional Working Day' : 'Mark date as Holiday (excluded from attendance %)'}
+            >
+              {isSelectedHoliday ? 'Set Working Day' : 'Mark Holiday'}
+            </button>
+          </div>
         </div>
 
         {/* Present on Date */}
@@ -277,7 +375,11 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
             <span className="text-xs text-slate-400">/ {totalStudentsCount} Total</span>
           </div>
           <span className="text-[10px] text-slate-500 mt-1 block">
-            {absentCountForDate > 0 ? `${absentCountForDate} marked Absent` : 'Verified present scans'}
+            {selectedDate === todayStr && !isAfterDeadline && !isTodayHoliday && pendingTodayCount > 0
+              ? `${pendingTodayCount} Pending before ${attendanceDeadline} IST`
+              : absentCountForDate > 0
+                ? `${absentCountForDate} marked Absent`
+                : 'Verified present scans'}
           </span>
         </div>
 
@@ -376,9 +478,35 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
           </button>
         </div>
 
-        {/* Status Filter & Search */}
+        {/* Status, Department, Semester Filters & Search */}
         {activeTab === 'records' && (
-          <div className="flex items-center gap-2 w-full md:w-auto">
+          <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
+            {/* Department Filter */}
+            <select
+              value={selectedDept}
+              onChange={(e) => setSelectedDept(e.target.value)}
+              className="px-2.5 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-blue-500 max-w-[160px]"
+            >
+              {availableDepts.map((dept) => (
+                <option key={dept} value={dept}>
+                  {dept === 'All' ? 'All Departments' : dept}
+                </option>
+              ))}
+            </select>
+
+            {/* Semester Filter */}
+            <select
+              value={selectedSemester}
+              onChange={(e) => setSelectedSemester(e.target.value)}
+              className="px-2.5 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-blue-500"
+            >
+              {availableSemesters.map((sem) => (
+                <option key={sem} value={sem}>
+                  {sem === 'All' ? 'All Semesters' : sem}
+                </option>
+              ))}
+            </select>
+
             {/* Status Filter */}
             <select
               value={statusFilter}
@@ -393,7 +521,7 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
             </select>
 
             {/* Search */}
-            <div className="relative w-full md:w-64">
+            <div className="relative w-full sm:w-56">
               <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-500">
                 <Search className="w-3.5 h-3.5" />
               </div>
@@ -725,7 +853,7 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
 
                       <td className="py-3.5 px-4 text-slate-400 font-mono text-[11px]">
                         <div>{t.deletedBy}</div>
-                        <div className="text-[10px] text-slate-500">{new Date(t.deletedAt).toLocaleString()}</div>
+                        <div className="text-[10px] text-slate-500">{getISTTimestampDisplay(t.deletedAt)}</div>
                       </td>
 
                       <td className="py-3.5 px-4 text-right">
@@ -998,6 +1126,11 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
       <ESP32FirmwareGuideModal
         isOpen={isFirmwareGuideOpen}
         onClose={() => setIsFirmwareGuideOpen(false)}
+      />
+
+      <DatabaseMigrationModal
+        isOpen={isMigrationModalOpen}
+        onClose={() => setIsMigrationModalOpen(false)}
       />
     </div>
   );

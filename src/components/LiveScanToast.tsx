@@ -7,6 +7,7 @@ import {
   Radio 
 } from 'lucide-react';
 import { useAttendance } from '../context/AttendanceContext';
+import { getISTTimeStr } from '../utils/dateUtils';
 
 export const LiveScanToast: React.FC = () => {
   const { lastLiveEvent, clearLastLiveEvent } = useAttendance();
@@ -59,7 +60,7 @@ export const LiveScanToast: React.FC = () => {
               Live RFID Tap
             </span>
             <span className="text-[10px] font-mono text-slate-400">
-              {record.time || new Date().toLocaleTimeString()}
+              {record.time || getISTTimeStr()}
             </span>
           </div>
 

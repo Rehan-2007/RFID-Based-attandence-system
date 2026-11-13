@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useAttendance } from '../context/AttendanceContext';
+import { getISTClockTime } from '../utils/dateUtils';
 
 export type NavPage = 'dashboard' | 'students' | 'attendance' | 'reports' | 'settings' | 'reset';
 
@@ -34,7 +35,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenScanner,
 }) => {
   const { user, logout } = useAuth();
-  const { isDbConnected, dbErrorMessage, totalStudentsCount, presentTodayCount } = useAttendance();
+  const { isDbConnected, dbErrorMessage, totalStudentsCount, presentTodayCount, lastSyncedAt } = useAttendance();
 
   const navItems = [
     {
@@ -89,7 +90,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {/* Sidebar Container */}
       <aside
-        className={`fixed lg:static top-0 bottom-0 left-0 z-50 w-72 bg-[#0c1220]/95 backdrop-blur-xl border-r border-slate-800/80 flex flex-col transition-transform duration-300 ease-in-out ${
+        className={`fixed lg:sticky lg:top-0 lg:h-screen shrink-0 top-0 bottom-0 left-0 z-50 w-72 bg-[#0c1220]/95 backdrop-blur-xl border-r border-slate-800/80 flex flex-col transition-transform duration-300 ease-in-out ${
           mobileOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
         }`}
       >
@@ -146,7 +147,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   }`} />
                 </p>
                 <p className="text-[10px] text-slate-400 font-mono">
-                  {dbErrorMessage ? 'Access Restricted' : isDbConnected ? 'Connected & Synced' : 'Connecting to Server...'}
+                  {dbErrorMessage
+                    ? 'Access Restricted'
+                    : isDbConnected
+                      ? lastSyncedAt
+                        ? `Synced ${getISTClockTime(lastSyncedAt)}`
+                        : 'Connected & Synced'
+                      : 'Connecting to Server...'}
                 </p>
               </div>
             </div>

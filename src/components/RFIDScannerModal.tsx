@@ -12,6 +12,7 @@ import {
   Clock
 } from 'lucide-react';
 import { useAttendance } from '../context/AttendanceContext';
+import { getISTClockTime, getISTDateStr } from '../utils/dateUtils';
 
 interface RFIDScannerModalProps {
   isOpen: boolean;
@@ -41,7 +42,7 @@ export const RFIDScannerModal: React.FC<RFIDScannerModalProps> = ({ isOpen, onCl
         success: res.success,
         message: res.message,
         uid: uidToScan.trim().toUpperCase(),
-        timestamp: new Date().toLocaleTimeString(),
+        timestamp: `${getISTClockTime()} IST`,
       });
       if (uidToScan === customUid) {
         setCustomUid('');
@@ -203,7 +204,7 @@ export const RFIDScannerModal: React.FC<RFIDScannerModalProps> = ({ isOpen, onCl
                     {lastResult.message}
                   </p>
                   <div className="mt-2 text-[10px] font-mono bg-black/40 p-2 rounded border border-white/10 text-slate-300">
-                    Target Realtime DB path: <span className="text-cyan-300">attendance/{new Date().toISOString().split('T')[0]}/{lastResult.uid}</span>
+                    Target Realtime DB path: <span className="text-cyan-300">students/{lastResult.uid}/attendance/{getISTDateStr()}</span>
                   </div>
                 </div>
               </div>
@@ -223,7 +224,7 @@ export const RFIDScannerModal: React.FC<RFIDScannerModalProps> = ({ isOpen, onCl
               ESP32 writes JSON via Firebase Realtime Database REST/Client API to:
             </p>
             <p className="text-cyan-300 text-[10px] truncate mt-0.5">
-              https://rfid-attendance-system-5fccd-default-rtdb.firebaseio.com/attendance/YYYY-MM-DD/UID.json
+              https://rfid-attendance-system-5fccd-default-rtdb.firebaseio.com/students/UID/attendance/YYYY-MM-DD.json
             </p>
           </div>
         </div>

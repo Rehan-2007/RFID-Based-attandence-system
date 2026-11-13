@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { X, ShieldAlert, Calendar, Clock, AlertTriangle, UserMinus, History, CheckCircle2 } from 'lucide-react';
 import { Student, StudentSuspension } from '../types';
 import { useAttendance } from '../context/AttendanceContext';
+import { addDaysIST, addMonthsIST, getISTDateStr } from '../utils/dateUtils';
 
 interface StudentSuspensionModalProps {
   student: Student | null;
@@ -27,26 +28,19 @@ export const StudentSuspensionModal: React.FC<StudentSuspensionModalProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'manage' | 'history'>('manage');
 
-  // Compute start and end dates based on duration selection
+  // Compute start and end dates in IST based on duration selection
   useEffect(() => {
-    const today = new Date();
-    const startStr = today.toISOString().split('T')[0];
+    const startStr = getISTDateStr();
     setStartDate(startStr);
 
-    const end = new Date(today);
     if (duration === '1_day') {
-      end.setDate(end.getDate() + 1);
+      setEndDate(addDaysIST(startStr, 1));
     } else if (duration === '1_week') {
-      end.setDate(end.getDate() + 7);
+      setEndDate(addDaysIST(startStr, 7));
     } else if (duration === '1_month') {
-      end.setMonth(end.getMonth() + 1);
-    }
-    // If custom, leave endDate as is or set default 3 days
-    if (duration !== 'custom') {
-      setEndDate(end.toISOString().split('T')[0]);
+      setEndDate(addMonthsIST(startStr, 1));
     } else if (!endDate) {
-      end.setDate(end.getDate() + 3);
-      setEndDate(end.toISOString().split('T')[0]);
+      setEndDate(addDaysIST(startStr, 3));
     }
   }, [duration, isOpen]);
 
@@ -368,8 +362,8 @@ export const StudentSuspensionModal: React.FC<StudentSuspensionModalProps> = ({
                     </p>
 
                     <p className="text-[10px] text-slate-500 font-mono">
-                      Issued by {susp.suspendedBy} on {new Date(susp.createdAt).toLocaleDateString()}
-                      {susp.revokedAt && ` • Revoked on ${new Date(susp.revokedAt).toLocaleDateString()}`}
+                      Issued by {susp.suspendedBy} on {getISTDateStr(susp.createdAt)} IST
+                      {susp.revokedAt && ` • Revoked on ${getISTDateStr(susp.revokedAt)} IST`}
                     </p>
                   </div>
                 ))

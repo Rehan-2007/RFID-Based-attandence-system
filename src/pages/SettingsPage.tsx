@@ -14,7 +14,10 @@ import {
   CheckCircle2, 
   AlertTriangle,
   Lock,
-  Wifi
+  Wifi,
+  Layers,
+  ArrowRight,
+  Clock
 } from 'lucide-react';
 import { 
   getActiveFirebaseConfig, 
@@ -24,15 +27,41 @@ import {
 } from '../services/firebase';
 import { useAttendance } from '../context/AttendanceContext';
 import { ref, get } from 'firebase/database';
+import { DatabaseMigrationModal } from '../components/DatabaseMigrationModal';
 
 export const SettingsPage: React.FC = () => {
-  const { isDbConnected, seedDefaultStudents, dbErrorMessage } = useAttendance();
+  const {
+    isDbConnected,
+    seedDefaultStudents,
+    migrationInspection,
+    unregisteredRecovery,
+    attendanceDeadline,
+    isAfterDeadline,
+    updateAttendanceDeadline,
+  } = useAttendance();
   const [config, setConfig] = useState(getActiveFirebaseConfig());
   const [isSaved, setIsSaved] = useState(false);
+  const [deadlineInput, setDeadlineInput] = useState(attendanceDeadline);
+  const [deadlineStatus, setDeadlineStatus] = useState<{ success: boolean; message: string } | null>(null);
+  const [isSavingDeadline, setIsSavingDeadline] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [isTesting, setIsTesting] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedRules, setCopiedRules] = useState(false);
+  const [isMigrationModalOpen, setIsMigrationModalOpen] = useState(false);
+
+  React.useEffect(() => {
+    setDeadlineInput(attendanceDeadline);
+  }, [attendanceDeadline]);
+
+  const handleSaveDeadline = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSavingDeadline(true);
+    setDeadlineStatus(null);
+    const res = await updateAttendanceDeadline(deadlineInput);
+    setDeadlineStatus(res);
+    setIsSavingDeadline(false);
+  };
 
   const handleSaveConfig = (e: React.FormEvent) => {
     e.preventDefault();
@@ -235,24 +264,63 @@ void loop() {
   char timeStr[20];
   strftime(timeStr, sizeof(timeStr), "%H:%M:%S", &timeinfo);
 
-  // Push to Firebase Realtime Database
+  // Push directly to Unified Student Attendance Node: /students/{UID}/attendance/{DATE}.json
   if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient checkHttp;
+    // 1. Verify student exists, is active, and is not suspended
+    String studentStatusUrl = String(FIREBASE_HOST) + "/students/" + uidStr + "/status.json";
+    checkHttp.begin(studentStatusUrl);
+    int statusHttpCode = checkHttp.GET();
+    String statusBody = statusHttpCode == 200 ? checkHttp.getString() : "null";
+    checkHttp.end();
+
+    if (statusBody.indexOf("active") < 0) {
+      Serial.println("[BLOCKED] Student unregistered or suspended (" + statusBody + "). Skipping attendance write.");
+      rfid.PICC_HaltA();
+      rfid.PCD_StopCrypto1();
+      delay(1500);
+      return;
+    }
+
+    // 2. Check if admin already locked this date via Manual Override
+    String overrideUrl = String(FIREBASE_HOST) + "/students/" + uidStr + "/attendance/" + String(dateStr) + "/isOverridden.json";
+    checkHttp.begin(overrideUrl);
+    int overrideHttpCode = checkHttp.GET();
+    String overrideBody = overrideHttpCode == 200 ? checkHttp.getString() : "null";
+    checkHttp.end();
+
+    if (overrideBody.indexOf("true") >= 0) {
+      Serial.println("[LOCKED] Date is locked by Admin Manual Override.");
+      rfid.PICC_HaltA();
+      rfid.PCD_StopCrypto1();
+      delay(1500);
+      return;
+    }
+
+    // 3. Register date in shared working_days/{DATE} calendar index
+    HTTPClient wdHttp;
+    wdHttp.begin(String(FIREBASE_HOST) + "/working_days/" + String(dateStr) + ".json");
+    wdHttp.addHeader("Content-Type", "application/json");
+    wdHttp.sendRequest("PATCH", "{\\"date\\":\\"" + String(dateStr) + "\\",\\"isHoliday\\":false}");
+    wdHttp.end();
+
+    // 4. Write directly to Unified Path: /students/{UID}/attendance/{DATE}.json
     HTTPClient http;
-    // Database Path: attendance/YYYY-MM-DD/UID.json
-    String url = String(FIREBASE_HOST) + "/attendance/" + String(dateStr) + "/" + uidStr + ".json";
+    String url = String(FIREBASE_HOST) + "/students/" + uidStr + "/attendance/" + String(dateStr) + ".json";
 
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
 
     String jsonPayload = "{\\"uid\\":\\"" + uidStr + 
+                         "\\",\\"rfidUID\\":\\"" + uidStr +
                          "\\",\\"date\\":\\"" + String(dateStr) + 
                          "\\",\\"time\\":\\"" + String(timeStr) + 
-                         "\\",\\"timestamp\\":" + String(millis()) + 
+                         "\\",\\"timestamp\\":" + String((unsigned long)time(nullptr)) + 
                          ",\\"device\\":\\"ESP32-RFID-01\\",\\"status\\":\\"Present\\"}";
 
     int httpCode = http.PUT(jsonPayload);
     if (httpCode > 0) {
-      Serial.printf("[HTTP %d] Attendance Synced to Firebase!\\n", httpCode);
+      Serial.printf("[HTTP %d] Attendance Synced to /students/%s/attendance/%s!\\n", httpCode, uidStr.c_str(), dateStr);
     } else {
       Serial.printf("[HTTP ERROR] %s\\n", http.errorToString(httpCode).c_str());
     }
@@ -264,54 +332,118 @@ void loop() {
   delay(1500); // Debounce to prevent accidental double-reads
 }`;
 
-  // Production Security Rules enforcing authenticated access and preventing public access
+  // Production Security Rules matching database.rules.json (Unified students/{RFID_UID}/attendance/{DATE})
   const rtdbSecurityRules = `{
   "rules": {
-    /* Prevent unauthenticated public access */
     ".read": false,
     ".write": false,
 
     "students": {
-      /* Authenticated administrators and ESP32 devices can read student records */
       ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')",
-      /* Only administrator can add, edit, or purge student records */
-      ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'"
-    },
-
-    "attendance": {
-      /* Authenticated users (Administrators, ESP32 hardware, and verified Students) can read attendance */
-      ".read": "auth != null",
-      /* Only administrator can purge or reset all attendance records */
       ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
-      "$date": {
-        ".read": "auth != null",
+
+      "$rfidUid": {
+        ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82' || data.child('authUid').val() === auth.uid || (data.child('email').val() === auth.token.email && auth.token.email != null))",
         ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
-        "$uid": {
-          ".read": "auth != null",
-          /* Authenticated ESP32 device account (MdwxcdNtLgZp3cnYoqXBNkin8C82) or Admin can record attendance */
-          ".write": "auth != null",
-          ".validate": "newData.hasChildren(['uid', 'date', 'time', 'status'])"
+
+        "attendance": {
+          ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82' || data.parent().child('authUid').val() === auth.uid || (data.parent().child('email').val() === auth.token.email && auth.token.email != null))",
+          ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
+
+          "$date": {
+            ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82' || data.parent().parent().child('authUid').val() === auth.uid || (data.parent().parent().child('email').val() === auth.token.email && auth.token.email != null))",
+            ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || (auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82' && data.parent().parent().exists() && data.parent().parent().child('status').val() === 'active' && data.parent().parent().child('isSuspended').val() !== true && (!data.exists() || data.child('isOverridden').val() !== true)))",
+            ".validate": "newData.hasChildren(['date', 'status', 'time', 'timestamp'])"
+          }
         }
       }
     },
 
+    "working_days": {
+      ".read": "auth != null",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')"
+    },
+
+    "settings": {
+      ".read": "auth != null",
+      ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'"
+    },
+
+    "users": {
+      "$authUid": {
+        ".read": "auth != null && (auth.uid === $authUid || auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2')",
+        ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'"
+      }
+    },
+
+    "rfid_to_uid": {
+      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')",
+      ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'"
+    },
+
+    "attendance_trash": {
+      ".read": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
+      ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'"
+    },
+
+    "audit_logs": {
+      ".read": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
+      ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'"
+    },
+
+    "auditLogs": {
+      ".read": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
+      ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'"
+    },
+
+    "suspensions": {
+      ".read": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
+      ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
+      "$rfidUid": {
+        ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('students').child($rfidUid).child('authUid').val() === auth.uid)"
+      }
+    },
+
+    "database_backups": {
+      ".read": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
+      ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'"
+    },
+
+    "migration_recovery": {
+      ".read": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
+      ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'"
+    },
+
+    "migration_status": {
+      ".read": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
+      ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'"
+    },
+
     "deviceCommands": {
       "esp32": {
-        /* Administrator dispatches reset commands; ESP32 reads & acknowledges */
         ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')",
         ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')"
       }
     },
 
-    "auditLogs": {
-      /* Audit trail of all database purges and system resets */
+    "unknown_scans": {
+      ".read": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')"
+    },
+
+    "devices": {
+      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')"
+    },
+
+    "attendance": {
       ".read": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
       ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'"
     },
 
-    "unknown_scans": {
+    "students_attendance": {
       ".read": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
-      ".write": "auth != null"
+      ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'"
     }
   }
 }`;
@@ -511,6 +643,102 @@ void loop() {
         </div>
       </div>
 
+      {/* Attendance Window & Cutoff Deadline (Asia/Kolkata) */}
+      <div className="p-6 rounded-2xl bg-[#0c1220]/90 backdrop-blur-xl border border-slate-800/80 shadow-xl flex flex-col lg:flex-row lg:items-center justify-between gap-5">
+        <div className="space-y-1.5 max-w-2xl">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400">
+              <Clock className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <span>Attendance Window &amp; Cutoff Deadline (Asia/Kolkata)</span>
+                <span className={`px-2 py-0.5 rounded-full text-[10px] font-mono border ${
+                  isAfterDeadline
+                    ? 'bg-rose-500/10 text-rose-300 border-rose-500/30'
+                    : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
+                }`}>
+                  {isAfterDeadline ? 'Window Closed Today' : 'Window Open Today'}
+                </span>
+              </h3>
+              <p className="text-[11px] text-slate-400">
+                Unscanned active students stay <strong className="text-amber-300">Pending</strong> while the window is open and are only counted <strong className="text-rose-300">Absent</strong> after this daily IST cutoff.
+              </p>
+            </div>
+          </div>
+          {deadlineStatus && (
+            <p className={`text-xs font-medium pt-1 ${deadlineStatus.success ? 'text-emerald-400' : 'text-rose-400'}`}>
+              {deadlineStatus.message}
+            </p>
+          )}
+        </div>
+
+        <form onSubmit={handleSaveDeadline} className="flex flex-wrap items-center gap-2.5 shrink-0">
+          <input
+            type="time"
+            value={deadlineInput}
+            onChange={(e) => setDeadlineInput(e.target.value)}
+            required
+            className="px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-700 text-cyan-300 font-mono text-xs focus:outline-none focus:border-amber-500"
+          />
+          <button
+            type="submit"
+            disabled={isSavingDeadline}
+            className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold shadow-md shadow-amber-600/20 transition cursor-pointer disabled:opacity-50"
+          >
+            {isSavingDeadline ? 'Saving...' : 'Save Cutoff (IST)'}
+          </button>
+        </form>
+      </div>
+
+      {/* Unified Database Architecture & Migration Center Card */}
+      <div className="p-6 rounded-2xl bg-[#0c1220]/90 backdrop-blur-xl border border-slate-800/80 shadow-xl flex flex-col lg:flex-row lg:items-center justify-between gap-5">
+        <div className="space-y-2">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+              <Layers className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="text-sm font-bold text-white">Unified Database Architecture & Migration Center</h3>
+              <p className="text-[11px] text-slate-400">
+                Single root structure: <code className="text-cyan-300 font-mono">students/{'{RFID_UID}'}/attendance/{'{DATE}'}</code>
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 pt-1 text-[11px] font-mono">
+            <span className="px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-800 text-slate-300">
+              Students: <strong className="text-white">{migrationInspection?.studentCount ?? 0}</strong>
+            </span>
+            <span className="px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-800 text-emerald-300">
+              Unified Records: <strong>{migrationInspection?.alreadyUnifiedCount ?? 0}</strong>
+            </span>
+            <span className={`px-2.5 py-1 rounded-lg bg-slate-950 border text-xs ${
+              migrationInspection?.hasLegacyAttendance
+                ? 'border-amber-500/40 text-amber-300'
+                : 'border-slate-800 text-slate-400'
+            }`}>
+              Legacy Queue: <strong>{migrationInspection?.legacyRecordCount ?? 0}</strong>
+            </span>
+            <span className={`px-2.5 py-1 rounded-lg bg-slate-950 border text-xs ${
+              unregisteredRecovery.length > 0
+                ? 'border-rose-500/40 text-rose-300'
+                : 'border-slate-800 text-slate-400'
+            }`}>
+              Unregistered Cards: <strong>{unregisteredRecovery.length}</strong>
+            </span>
+          </div>
+        </div>
+
+        <button
+          onClick={() => setIsMigrationModalOpen(true)}
+          className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-bold shadow-lg shadow-emerald-500/20 border border-emerald-400/30 transition flex items-center gap-2 self-start lg:self-auto cursor-pointer"
+        >
+          <Layers className="w-4 h-4" />
+          <span>Open Migration Center</span>
+          <ArrowRight className="w-3.5 h-3.5" />
+        </button>
+      </div>
+
       {/* ESP32 Arduino Firmware Code Section */}
       <div className="p-6 rounded-2xl bg-[#0c1220]/90 backdrop-blur-xl border border-slate-800/80 shadow-xl space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
@@ -590,6 +818,11 @@ void loop() {
           <pre>{rtdbSecurityRules}</pre>
         </div>
       </div>
+
+      <DatabaseMigrationModal
+        isOpen={isMigrationModalOpen}
+        onClose={() => setIsMigrationModalOpen(false)}
+      />
     </div>
   );
 };

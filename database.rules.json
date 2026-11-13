@@ -1,0 +1,114 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+
+    "students": {
+      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')",
+      ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
+
+      "$rfidUid": {
+        ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82' || data.child('authUid').val() === auth.uid || (data.child('email').val() === auth.token.email && auth.token.email != null))",
+        ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
+
+        "attendance": {
+          ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82' || data.parent().child('authUid').val() === auth.uid || (data.parent().child('email').val() === auth.token.email && auth.token.email != null))",
+          ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
+
+          "$date": {
+            ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82' || data.parent().parent().child('authUid').val() === auth.uid || (data.parent().parent().child('email').val() === auth.token.email && auth.token.email != null))",
+            ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || (auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82' && data.parent().parent().exists() && data.parent().parent().child('status').val() === 'active' && data.parent().parent().child('isSuspended').val() !== true && (!data.exists() || data.child('isOverridden').val() !== true)))",
+            ".validate": "newData.hasChildren(['date', 'status', 'time', 'timestamp'])"
+          }
+        }
+      }
+    },
+
+    "working_days": {
+      ".read": "auth != null",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')"
+    },
+
+    "settings": {
+      ".read": "auth != null",
+      ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'"
+    },
+
+    "users": {
+      "$authUid": {
+        ".read": "auth != null && (auth.uid === $authUid || auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2')",
+        ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'"
+      }
+    },
+
+    "rfid_to_uid": {
+      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')",
+      ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'"
+    },
+
+    "attendance_trash": {
+      ".read": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
+      ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'"
+    },
+
+    "audit_logs": {
+      ".read": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
+      ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'"
+    },
+
+    "auditLogs": {
+      ".read": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
+      ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'"
+    },
+
+    "suspensions": {
+      ".read": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
+      ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
+      "$rfidUid": {
+        ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('students').child($rfidUid).child('authUid').val() === auth.uid)"
+      }
+    },
+
+    "database_backups": {
+      ".read": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
+      ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'"
+    },
+
+    "migration_recovery": {
+      ".read": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
+      ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'"
+    },
+
+    "migration_status": {
+      ".read": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
+      ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'"
+    },
+
+    "deviceCommands": {
+      "esp32": {
+        ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')",
+        ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')"
+      }
+    },
+
+    "unknown_scans": {
+      ".read": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')"
+    },
+
+    "devices": {
+      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')"
+    },
+
+    "attendance": {
+      ".read": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
+      ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'"
+    },
+
+    "students_attendance": {
+      ".read": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'",
+      ".write": "auth != null && auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2'"
+    }
+  }
+}

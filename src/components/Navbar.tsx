@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { useAttendance } from '../context/AttendanceContext';
 import { NavPage } from './Sidebar';
+import { getISTClockTime, getISTDisplayDate } from '../utils/dateUtils';
 
 interface NavbarProps {
   currentPage: NavPage;
@@ -32,8 +33,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   useEffect(() => {
     const updateTime = () => {
       const now = new Date();
-      setTime(now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
-      setDateStr(now.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }));
+      setTime(`${getISTClockTime(now)} IST`);
+      setDateStr(getISTDisplayDate(now));
     };
     updateTime();
     const interval = setInterval(updateTime, 1000);
@@ -68,33 +69,34 @@ export const Navbar: React.FC<NavbarProps> = ({
   };
 
   return (
-    <header className="sticky top-0 z-30 h-18 bg-[#090d16]/80 backdrop-blur-md border-b border-slate-800/80 px-4 sm:px-6 flex items-center justify-between">
+    <header className="sticky top-0 z-30 min-h-[4.25rem] py-2 bg-[#090d16]/80 backdrop-blur-md border-b border-slate-800/80 px-4 sm:px-6 flex items-center justify-between gap-2">
       {/* Left: Mobile trigger & Page Title */}
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 min-w-0">
         <button
           onClick={onOpenMobile}
-          className="lg:hidden p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 focus:outline-none"
+          className="lg:hidden p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 focus:outline-none shrink-0"
           aria-label="Open menu"
         >
           <Menu className="w-5 h-5" />
         </button>
 
-        <div>
-          <h1 className="text-base sm:text-lg font-bold text-slate-100 flex items-center gap-2">
-            <span>{titles[currentPage].title}</span>
+        <div className="min-w-0">
+          <h1 className="text-base sm:text-lg font-bold text-slate-100 flex items-center gap-2 truncate">
+            <span className="truncate">{titles[currentPage].title}</span>
           </h1>
-          <p className="text-[11px] text-slate-400 hidden sm:block">
+          <p className="text-[11px] text-slate-400 hidden sm:block truncate">
             {titles[currentPage].subtitle}
           </p>
         </div>
       </div>
 
       {/* Right Actions & Telemetry */}
-      <div className="flex items-center gap-2.5 sm:gap-4">
+      <div className="flex items-center gap-2 sm:gap-4 shrink-0">
         {/* Live ESP32 Hardware Status indicator */}
-        <div 
+        <button
+          type="button"
           onClick={() => onNavigate('settings')}
-          className="cursor-pointer hidden md:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900/90 border border-slate-800 hover:border-slate-700 transition"
+          className="cursor-pointer flex items-center gap-1.5 sm:gap-2 px-2.5 sm:px-3 py-1.5 rounded-lg bg-slate-900/90 border border-slate-800 hover:border-slate-700 transition"
           title="Firebase Realtime Database: rfid-attendance-system-5fccd"
         >
           <div className="relative flex items-center justify-center">
@@ -110,17 +112,18 @@ export const Navbar: React.FC<NavbarProps> = ({
             )}
           </div>
           <span className="text-[11px] font-mono text-slate-300 font-medium">
-            RTDB: <span className={
+            <span className="hidden md:inline">RTDB: </span>
+            <span className={
               dbErrorMessage 
                 ? 'text-rose-400' 
                 : isDbConnected 
                   ? 'text-emerald-400' 
                   : 'text-amber-400'
             }>
-              {dbErrorMessage ? 'RESTRICTED' : isDbConnected ? 'ONLINE' : 'SYNCING'}
+              {dbErrorMessage ? 'ERR' : isDbConnected ? 'LIVE' : 'SYNC'}
             </span>
           </span>
-        </div>
+        </button>
 
         {/* Live Clock & Calendar */}
         <div className="hidden xl:flex items-center gap-3 px-3 py-1.5 rounded-lg bg-slate-900/60 border border-slate-800/60 text-slate-300 text-xs">

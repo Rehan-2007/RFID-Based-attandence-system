@@ -17,13 +17,24 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { useAttendance } from '../context/AttendanceContext';
 import { lookupStudentInfo } from '../services/firebase';
+import { getISTWeekdayName } from '../utils/dateUtils';
 
 export const StudentAttendancePage: React.FC = () => {
   const { user } = useAuth();
-  const { allAttendance, todayAttendance, refreshAttendance, isRefreshing } = useAttendance();
+  const {
+    allAttendance,
+    todayAttendance,
+    refreshAttendance,
+    isRefreshing,
+    applicableWorkingDates,
+    workingDays,
+    todayStr,
+    isAfterDeadline,
+    attendanceDeadline,
+  } = useAttendance();
 
   const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'Present' | 'Absent'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'Present' | 'Absent' | 'Pending'>('all');
   const [monthFilter, setMonthFilter] = useState<string>('all');
   const [refreshNotification, setRefreshNotification] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
@@ -43,21 +54,8 @@ export const StudentAttendancePage: React.FC = () => {
   const studentEmail = user?.email?.toLowerCase();
   const studentRoll = (user?.studentId || user?.rollNumber || resolvedInfo?.studentId || '').trim();
 
-  const now = new Date();
-  const localTodayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-  const utcTodayStr = now.toISOString().split('T')[0];
-
-  // Build daily records for every institutional recorded date
+  // Build daily records for every applicable IST working date + personal record dates
   const records = useMemo(() => {
-    const dates = new Set<string>(Object.keys(allAttendance));
-    dates.add(localTodayStr);
-    dates.add(utcTodayStr);
-    dates.add('2026-11-08');
-
-    Object.values(todayAttendance).forEach((item) => {
-      if (item?.date) dates.add(item.date);
-    });
-
     const isMatchingStudent = (item: any): boolean => {
       if (!item) return false;
       const itemRfid = (item.rfidUID || item.uid || item.studentRfid || '')?.toString().trim().toUpperCase();
@@ -72,16 +70,32 @@ export const StudentAttendancePage: React.FC = () => {
       return false;
     };
 
+    const dates = new Set<string>(
+      applicableWorkingDates.filter((d) => !workingDays[d]?.isHoliday && d <= todayStr)
+    );
+
+    Object.entries(allAttendance).forEach(([dateKey, dayMap]) => {
+      if (workingDays[dateKey]?.isHoliday || dateKey > todayStr) return;
+      const hasStudentRec = Object.values(dayMap || {}).some((item) => item && !item.isDeleted && isMatchingStudent(item));
+      if (hasStudentRec) dates.add(dateKey);
+    });
+
+    Object.values(todayAttendance).forEach((item) => {
+      if (item?.date && !item.isDeleted && !workingDays[item.date]?.isHoliday && item.date <= todayStr && isMatchingStudent(item)) {
+        dates.add(item.date);
+      }
+    });
+
     const sortedDates = Array.from(dates).sort().reverse();
 
     return sortedDates.map((date) => {
       let isPresent = false;
+      let isExplicitAbsent = false;
       let time = '--:--:--';
       let device = 'ESP32-RFID-01';
       let isOverridden = false;
       let overrideReason = '';
 
-      // 1. Check in allAttendance[date]
       if (allAttendance[date]) {
         const candidates = [
           studentRfid ? allAttendance[date][studentRfid] : undefined,
@@ -97,8 +111,9 @@ export const StudentAttendancePage: React.FC = () => {
               time = item.time || time;
               device = item.device || device;
               break;
-            } else if (item.isOverridden) {
-              isOverridden = true;
+            } else if (item.status === 'Absent') {
+              isExplicitAbsent = true;
+              isOverridden = Boolean(item.isOverridden);
               overrideReason = item.overrideReason || '';
               time = item.time || time;
               device = item.device || device;
@@ -107,8 +122,7 @@ export const StudentAttendancePage: React.FC = () => {
         }
       }
 
-      // 2. Check in todayAttendance if this date matches
-      if (!isPresent) {
+      if (!isPresent && date === todayStr) {
         const todayCandidates = [
           studentRfid ? todayAttendance[studentRfid] : undefined,
           studentRfid ? todayAttendance[studentRfid.toLowerCase()] : undefined,
@@ -118,13 +132,14 @@ export const StudentAttendancePage: React.FC = () => {
         for (const item of todayCandidates) {
           if (item && isMatchingStudent(item)) {
             if (item.isDeleted) continue;
-            if (item.status === 'Present' && (item.date === date || (!item.date && (date === localTodayStr || date === utcTodayStr)))) {
+            if (item.status === 'Present' && (item.date === date || !item.date)) {
               isPresent = true;
               time = item.time || time;
               device = item.device || device;
               break;
-            } else if (item.isOverridden) {
-              isOverridden = true;
+            } else if (item.status === 'Absent') {
+              isExplicitAbsent = true;
+              isOverridden = Boolean(item.isOverridden);
               overrideReason = item.overrideReason || '';
               time = item.time || time;
               device = item.device || device;
@@ -133,17 +148,23 @@ export const StudentAttendancePage: React.FC = () => {
         }
       }
 
+      const status: 'Present' | 'Absent' | 'Pending' = isPresent
+        ? 'Present'
+        : isExplicitAbsent || date < todayStr || isAfterDeadline
+          ? 'Absent'
+          : 'Pending';
+
       return {
         date,
         time,
-        status: isPresent ? ('Present' as const) : ('Absent' as const),
+        status,
         isOverridden,
         overrideReason,
         device,
         studentUid: studentRfid || 'UNASSIGNED',
       };
     });
-  }, [allAttendance, todayAttendance, studentRfid, studentAuthUid, studentEmail, studentRoll, user?.displayName, resolvedInfo?.name, localTodayStr, utcTodayStr]);
+  }, [allAttendance, todayAttendance, applicableWorkingDates, workingDays, studentRfid, studentAuthUid, studentEmail, studentRoll, user?.displayName, resolvedInfo?.name, todayStr, isAfterDeadline]);
 
   // Unique available months for filter dropdown
   const availableMonths = useMemo(() => {
@@ -177,28 +198,38 @@ export const StudentAttendancePage: React.FC = () => {
     });
   }, [records, statusFilter, monthFilter, searchQuery]);
 
-  // Download personal CSV
+  // Download personal CSV (UTF-8 BOM + standardized columns)
   const handleExportCSV = () => {
-    const headers = ['Date', 'Student Name', 'Roll Number', 'RFID Card UID', 'Check-in Time', 'Status', 'Reader Device'];
+    const escapeCsv = (val: any) => `"${String(val ?? '').replace(/"/g, '""')}"`;
+    const headers = [
+      'Student Name',
+      'Roll Number',
+      'Student UID',
+      'Attendance Date',
+      'Check-in Time',
+      'Attendance Status',
+      'Reader Device',
+    ];
     const rows = filteredRecords.map((r) => [
-      r.date,
-      `"${user?.displayName || 'Student'}"`,
-      `"${user?.studentId || ''}"`,
-      r.studentUid,
-      r.time,
-      r.status,
-      r.device,
+      escapeCsv(user?.displayName || 'Student'),
+      escapeCsv(user?.studentId || studentRoll || 'N/A'),
+      escapeCsv(r.studentUid),
+      escapeCsv(r.date),
+      escapeCsv(r.time),
+      escapeCsv(r.status),
+      escapeCsv(r.device),
     ]);
 
-    const csvContent = [headers.join(','), ...rows.map((row) => row.join(','))].join('\n');
+    const csvContent = '\uFEFF' + [headers.map(escapeCsv).join(','), ...rows.map((row) => row.join(','))].join('\r\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.setAttribute('download', `student_attendance_${user?.studentId || 'report'}_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute('download', `student_attendance_${user?.studentId || 'report'}_${todayStr}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   const handleManualRefresh = async () => {
@@ -224,7 +255,7 @@ export const StudentAttendancePage: React.FC = () => {
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            Historical log of all RFID check-in events recorded for your card ({studentRfid || 'Unassigned'})
+            Unified log from <code className="text-emerald-300 font-mono">students/{studentRfid || 'UID'}/attendance</code> synced in real time
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2.5 self-start sm:self-auto">
@@ -237,7 +268,7 @@ export const StudentAttendancePage: React.FC = () => {
                 ? 'bg-slate-900 border-slate-700 text-slate-400 cursor-not-allowed'
                 : 'bg-emerald-600/20 hover:bg-emerald-600/30 border-emerald-500/40 text-emerald-300 hover:text-emerald-200 shadow-emerald-950/40 active:scale-95'
             }`}
-            title="Force re-fetch attendance records from Firebase Realtime Database and Firestore"
+            title="Force re-fetch attendance records from unified Firebase student attendance node"
           >
             <RotateCcw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-emerald-400' : 'text-emerald-400'}`} />
             <span>{isRefreshing ? 'Refreshing from Firebase...' : 'Manual Refresh'}</span>
@@ -316,6 +347,14 @@ export const StudentAttendancePage: React.FC = () => {
               Present
             </button>
             <button
+              onClick={() => setStatusFilter('Pending')}
+              className={`px-3 py-1 rounded-lg transition cursor-pointer ${
+                statusFilter === 'Pending' ? 'bg-amber-600/30 text-amber-300 font-semibold border border-amber-500/30' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              Pending
+            </button>
+            <button
               onClick={() => setStatusFilter('Absent')}
               className={`px-3 py-1 rounded-lg transition cursor-pointer ${
                 statusFilter === 'Absent' ? 'bg-rose-600/30 text-rose-300 font-semibold border border-rose-500/30' : 'text-slate-400 hover:text-white'
@@ -388,7 +427,7 @@ export const StudentAttendancePage: React.FC = () => {
                 </tr>
               ) : (
                 filteredRecords.map((rec, idx) => {
-                  const dayName = new Date(rec.date).toLocaleDateString('en-US', { weekday: 'long' });
+                  const dayName = getISTWeekdayName(rec.date, 'long');
                   return (
                     <tr key={idx} className="hover:bg-slate-850/30 transition">
                       <td className="py-3.5 px-4 font-mono font-medium text-slate-200">
@@ -405,6 +444,14 @@ export const StudentAttendancePage: React.FC = () => {
                           <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 font-semibold text-[11px] border border-emerald-500/20">
                             <CheckCircle2 className="w-3 h-3" />
                             <span>Present</span>
+                          </span>
+                        ) : rec.status === 'Pending' ? (
+                          <span
+                            title={`Attendance window open until ${attendanceDeadline} IST`}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-500/10 text-amber-300 font-semibold text-[11px] border border-amber-500/25"
+                          >
+                            <AlertCircle className="w-3 h-3" />
+                            <span>Pending</span>
                           </span>
                         ) : rec.isOverridden ? (
                           <span 
@@ -434,6 +481,10 @@ export const StudentAttendancePage: React.FC = () => {
                         {rec.status === 'Present' ? (
                           <span className="text-[10px] font-mono text-emerald-400 bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-500/20">
                             RFID VERIFIED
+                          </span>
+                        ) : rec.status === 'Pending' ? (
+                          <span className="text-[10px] font-mono text-amber-300 bg-amber-950/40 px-2 py-0.5 rounded border border-amber-500/20">
+                            WINDOW OPEN
                           </span>
                         ) : (
                           <span className="text-[10px] font-mono text-slate-500">

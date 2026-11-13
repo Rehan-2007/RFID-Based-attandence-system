@@ -23,6 +23,7 @@ export interface Student {
   authUid?: string; // Associated Firebase Auth UID
   isSuspended?: boolean;
   activeSuspension?: StudentSuspension;
+  attendance?: Record<string, AttendanceRecord>; // Unified nested attendance history keyed by YYYY-MM-DD
 }
 
 export interface UserProfile {
@@ -160,7 +161,8 @@ export interface AuditActivityLog {
     | 'BULK_RESTORE'
     | 'SUSPEND_STUDENT'
     | 'UNSUSPEND_STUDENT'
-    | 'UNDO_OPERATION';
+    | 'UNDO_OPERATION'
+    | 'DATABASE_MIGRATION';
   studentRfid?: string;
   studentName?: string;
   studentId?: string;
@@ -186,6 +188,61 @@ export interface UndoAction {
   executed: boolean;
 }
 
+export interface WorkingDayConfig {
+  date: string;
+  isHoliday?: boolean;
+  label?: string;
+  updatedAt?: number;
+}
+
+export interface UnregisteredAttendanceGroup {
+  uid: string;
+  records: Record<string, AttendanceRecord>;
+  recordCount: number;
+  sampleName?: string;
+}
+
+export interface MigrationInspection {
+  hasLegacyAttendance: boolean;
+  legacyDateCount: number;
+  legacyRecordCount: number;
+  studentCount: number;
+  alreadyUnifiedCount: number;
+  unregisteredCount: number;
+  unregisteredGroups: UnregisteredAttendanceGroup[];
+  backupCount: number;
+  migrationCompletedAt?: number;
+  legacyKeysSample: string[];
+}
+
+export interface MigrationRecordLog {
+  uid: string;
+  date: string;
+  targetPath: string;
+  action: 'migrated' | 'merged' | 'recovery' | 'failed';
+  message?: string;
+}
+
+export interface MigrationResult {
+  success: boolean;
+  message: string;
+  backupPath?: string;
+  migratedCount: number;
+  skippedDuplicateCount: number;
+  unregisteredCount: number;
+  verifiedCount: number;
+  totalLegacyCount: number;
+  legacyRemoved: boolean;
+  errors: string[];
+  recordLogs?: MigrationRecordLog[];
+}
+
+export interface AttendanceSettings {
+  deadlineTime: string; // HH:mm in Asia/Kolkata, e.g. '10:30'
+  updatedAt?: number;
+  updatedBy?: string;
+}
+
 export interface AttendanceFilter {
   date: string;
   searchQuery: string;
@@ -198,6 +255,8 @@ export interface DayStats {
   dayName: string;
   present: number;
   absent: number;
+  pending?: number;
+  isHoliday?: boolean;
   total: number;
   percentage: number;
 }

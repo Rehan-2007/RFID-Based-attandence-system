@@ -7,7 +7,9 @@ import {
   ShieldCheck
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { useAttendance } from '../context/AttendanceContext';
 import { StudentTab } from './StudentSidebar';
+import { getISTClockTime } from '../utils/dateUtils';
 
 interface StudentNavbarProps {
   currentTab: StudentTab;
@@ -19,19 +21,12 @@ export const StudentNavbar: React.FC<StudentNavbarProps> = ({
   onOpenSidebar,
 }) => {
   const { user, logout } = useAuth();
+  const { isDbConnected, dbErrorMessage } = useAttendance();
   const [time, setTime] = useState<string>('');
 
   useEffect(() => {
     const updateTime = () => {
-      const now = new Date();
-      setTime(
-        now.toLocaleTimeString([], { 
-          hour: '2-digit', 
-          minute: '2-digit', 
-          second: '2-digit', 
-          hour12: true 
-        })
-      );
+      setTime(`${getISTClockTime()} IST`);
     };
     updateTime();
     const interval = setInterval(updateTime, 1000);
@@ -84,7 +79,34 @@ export const StudentNavbar: React.FC<StudentNavbarProps> = ({
         </div>
       </div>
 
-      <div className="flex items-center gap-2.5 sm:gap-4">
+      <div className="flex items-center gap-2 sm:gap-3">
+        {/* Live RTDB Connection Indicator */}
+        <div
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-[11px] font-mono"
+          title={dbErrorMessage || 'Firebase Realtime Database Connection'}
+        >
+          <span
+            className={`w-2 h-2 rounded-full ${
+              dbErrorMessage
+                ? 'bg-rose-500'
+                : isDbConnected
+                  ? 'bg-emerald-400 animate-pulse'
+                  : 'bg-amber-400'
+            }`}
+          />
+          <span
+            className={
+              dbErrorMessage
+                ? 'text-rose-400'
+                : isDbConnected
+                  ? 'text-emerald-400'
+                  : 'text-amber-400'
+            }
+          >
+            {dbErrorMessage ? 'OFFLINE' : isDbConnected ? 'SYNCED' : 'SYNCING'}
+          </span>
+        </div>
+
         {/* RFID Card Badge */}
         {user?.rfidUID && (
           <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs font-mono">
@@ -94,10 +116,10 @@ export const StudentNavbar: React.FC<StudentNavbarProps> = ({
           </div>
         )}
 
-        {/* Live Clock */}
-        <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900/80 border border-slate-800 text-xs font-mono text-slate-300">
+        {/* Live IST Clock */}
+        <div className="hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900/80 border border-slate-800 text-xs font-mono text-slate-300">
           <Clock className="w-3.5 h-3.5 text-cyan-400" />
-          <span>{time || '--:--:--'}</span>
+          <span>{time || '--:--:-- IST'}</span>
         </div>
 
         {/* Sign Out Button */}

@@ -24,6 +24,7 @@ import {
   remove, 
   onValue, 
   off, 
+  runTransaction,
   DataSnapshot,
   Database
 } from 'firebase/database';
@@ -54,10 +55,80 @@ import {
   StudentSuspension,
   AuditActivityLog,
   UndoAction,
-  TrashAttendanceRecord
+  TrashAttendanceRecord,
+  WorkingDayConfig,
+  MigrationInspection,
+  MigrationResult,
+  MigrationRecordLog,
+  AttendanceSettings,
+  UnregisteredAttendanceGroup
 } from '../types';
+import {
+  getISTDateStr,
+  getISTTimeStr,
+  getISTTimestampDisplay,
+  isValidDateStr,
+  isValidDeadlineHHMM,
+} from '../utils/dateUtils';
 
 const STORAGE_KEY_FIREBASE_CONFIG = 'rfid_firebase_config_override';
+const STORAGE_KEY_ATTENDANCE_SETTINGS = 'rfid_attendance_settings_v1';
+export const DEFAULT_ATTENDANCE_DEADLINE = '10:30';
+
+/**
+ * Recursively strips any properties with `undefined` values so Firebase RTDB set()/update() never throws.
+ */
+export function stripUndefinedDeep<T>(value: T): T {
+  if (value === null || value === undefined) return value;
+  if (Array.isArray(value)) {
+    return value
+      .filter((item) => item !== undefined)
+      .map((item) => stripUndefinedDeep(item)) as unknown as T;
+  }
+  if (typeof value === 'object') {
+    const cleaned: Record<string, any> = {};
+    Object.entries(value as Record<string, any>).forEach(([k, v]) => {
+      if (v !== undefined) {
+        cleaned[k] = stripUndefinedDeep(v);
+      }
+    });
+    return cleaned as T;
+  }
+  return value;
+}
+
+const VALID_ATTENDANCE_STATUSES: AttendanceStatus[] = [
+  'Present',
+  'Absent',
+  'Late',
+  'Excused',
+  'Duplicate',
+  'Unknown',
+];
+
+/**
+ * Validates required attendance record fields before writing to Firebase RTDB.
+ * Returns null if valid, or a descriptive error string.
+ */
+export function validateAttendancePayload(rec: Partial<AttendanceRecord>): string | null {
+  const uid = (rec.uid || rec.rfidUID || '').toString().trim().toUpperCase();
+  if (!uid || !/^[A-Z0-9_-]{2,32}$/.test(uid)) {
+    return `Invalid RFID UID "${rec.uid || ''}"`;
+  }
+  if (!rec.date || !isValidDateStr(rec.date)) {
+    return `Invalid attendance date "${rec.date || ''}" (expected YYYY-MM-DD)`;
+  }
+  if (!rec.time || !/^\d{2}:\d{2}(:\d{2})?$/.test(rec.time)) {
+    return `Invalid attendance time "${rec.time || ''}" (expected HH:mm:ss)`;
+  }
+  if (typeof rec.timestamp !== 'number' || !Number.isFinite(rec.timestamp) || rec.timestamp <= 0) {
+    return `Invalid attendance timestamp "${rec.timestamp}"`;
+  }
+  if (!rec.status || !VALID_ATTENDANCE_STATUSES.includes(rec.status)) {
+    return `Invalid attendance status "${rec.status || ''}"`;
+  }
+  return null;
+}
 
 export const CONFIGURED_ADMIN_UID = 'bi3c890VUXhVE0JFxroYfnlQwea2';
 export const CONFIGURED_ESP32_UID = 'MdwxcdNtLgZp3cnYoqXBNkin8C82';
@@ -324,11 +395,46 @@ export function subscribeToStudents(
 
 export async function saveStudent(student: Student): Promise<void> {
   const db = getFirebaseDatabase();
-  const studentRef = ref(db, `students/${student.uid.toUpperCase()}`);
-  await set(studentRef, {
+  const cardUid = student.uid.trim().toUpperCase();
+  const studentRef = ref(db, `students/${cardUid}`);
+
+  // Check if student already exists so profile edits use update() without wiping concurrent nested attendance
+  let exists = false;
+  let existingAttendance: Record<string, AttendanceRecord> | undefined = undefined;
+  try {
+    const snap = await withTimeout(get(studentRef), 3000, null);
+    if (snap && snap.exists && snap.exists()) {
+      exists = true;
+      const current = snap.val();
+      if (current?.attendance) {
+        existingAttendance = current.attendance;
+      }
+    }
+  } catch {}
+
+  if (exists && !student.attendance) {
+    const { attendance: _ignored, ...profileOnly } = student;
+    await update(
+      studentRef,
+      stripUndefinedDeep({
+        ...profileOnly,
+        uid: cardUid,
+      })
+    );
+    return;
+  }
+
+  const payload: any = {
     ...student,
-    uid: student.uid.toUpperCase(),
-  });
+    uid: cardUid,
+  };
+  if (student.attendance) {
+    payload.attendance = { ...(existingAttendance || {}), ...student.attendance };
+  } else if (existingAttendance) {
+    payload.attendance = existingAttendance;
+  }
+
+  await set(studentRef, stripUndefinedDeep(payload));
 }
 
 export async function deleteStudent(uid: string): Promise<void> {
@@ -337,73 +443,258 @@ export async function deleteStudent(uid: string): Promise<void> {
   await remove(studentRef);
 }
 
-// Attendance Realtime Database Operations
-// Structure: attendance/YYYY-MM-DD/RFID_UID/
+// Unified Attendance & Working Days Realtime Database Operations
+// Primary Unified Structure: students/{RFID_UID}/attendance/{YYYY-MM-DD}
+
+export function subscribeToAttendanceSettings(
+  onSuccess: (settings: AttendanceSettings) => void,
+  onError?: (err: Error) => void
+) {
+  let localFallback: AttendanceSettings = { deadlineTime: DEFAULT_ATTENDANCE_DEADLINE };
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_ATTENDANCE_SETTINGS);
+    if (raw) {
+      const parsed = JSON.parse(raw) as AttendanceSettings;
+      if (isValidDeadlineHHMM(parsed?.deadlineTime)) {
+        localFallback = parsed;
+      }
+    }
+  } catch {}
+
+  try {
+    const db = getFirebaseDatabase();
+    const settingsRef = ref(db, 'settings/attendance');
+    const unsubscribe = onValue(
+      settingsRef,
+      (snapshot: DataSnapshot) => {
+        if (snapshot.exists()) {
+          const val = snapshot.val() as AttendanceSettings;
+          if (val && isValidDeadlineHHMM(val.deadlineTime)) {
+            try {
+              localStorage.setItem(STORAGE_KEY_ATTENDANCE_SETTINGS, JSON.stringify(val));
+            } catch {}
+            onSuccess(val);
+            return;
+          }
+        }
+        onSuccess(localFallback);
+      },
+      (error) => {
+        onSuccess(localFallback);
+        onError?.(error);
+      }
+    );
+    return () => off(settingsRef, 'value', unsubscribe);
+  } catch (error) {
+    onSuccess(localFallback);
+    onError?.(error as Error);
+    return () => {};
+  }
+}
+
+export async function saveAttendanceSettings(
+  deadlineTime: string,
+  adminEmail?: string | null
+): Promise<AttendanceSettings> {
+  const cleanDeadline = deadlineTime.trim();
+  if (!isValidDeadlineHHMM(cleanDeadline)) {
+    throw new Error('Invalid deadline format. Please use 24-hour HH:mm format (e.g., 10:30).');
+  }
+
+  const payload: AttendanceSettings = stripUndefinedDeep({
+    deadlineTime: cleanDeadline,
+    updatedAt: Date.now(),
+    updatedBy: adminEmail || 'admin',
+  });
+
+  try {
+    localStorage.setItem(STORAGE_KEY_ATTENDANCE_SETTINGS, JSON.stringify(payload));
+  } catch {}
+
+  const db = getFirebaseDatabase();
+  await set(ref(db, 'settings/attendance'), payload);
+  return payload;
+}
+
+export function subscribeToWorkingDays(
+  onSuccess: (workingDays: Record<string, WorkingDayConfig>) => void,
+  onError?: (err: Error) => void
+) {
+  try {
+    const db = getFirebaseDatabase();
+    const wdRef = ref(db, 'working_days');
+    const unsubscribe = onValue(
+      wdRef,
+      (snapshot: DataSnapshot) => {
+        onSuccess(snapshot.val() || {});
+      },
+      (error) => {
+        console.warn('Working days listener notice:', error?.message);
+        onError?.(error);
+      }
+    );
+    return () => off(wdRef, 'value', unsubscribe);
+  } catch (error) {
+    onError?.(error as Error);
+    return () => {};
+  }
+}
+
+export async function setWorkingDayStatus(
+  date: string,
+  isHoliday: boolean,
+  label?: string
+): Promise<void> {
+  if (!isValidDateStr(date)) {
+    throw new Error(`Invalid date "${date}" for working day configuration.`);
+  }
+  const db = getFirebaseDatabase();
+  const payload: WorkingDayConfig = stripUndefinedDeep({
+    date,
+    isHoliday,
+    label: label || (isHoliday ? 'Holiday / Non-Working Day' : 'Institutional Working Day'),
+    updatedAt: Date.now(),
+  });
+  await set(ref(db, `working_days/${date}`), payload);
+}
+
+export async function syncWorkingDaysFromDates(dates: string[]): Promise<void> {
+  if (!dates || dates.length === 0) return;
+  try {
+    const db = getFirebaseDatabase();
+    const wdSnap = await withTimeout(get(ref(db, 'working_days')), 2500, null);
+    const existing = (wdSnap && wdSnap.exists && wdSnap.exists() ? wdSnap.val() : {}) as Record<string, WorkingDayConfig>;
+    const today = getISTDateStr();
+
+    const updates: Record<string, any> = {};
+    dates.forEach((d) => {
+      if (d && isValidDateStr(d) && d <= today && !existing[d]) {
+        updates[`working_days/${d}`] = {
+          date: d,
+          isHoliday: false,
+          label: 'Institutional Working Day',
+          updatedAt: Date.now(),
+        };
+      }
+    });
+
+    if (Object.keys(updates).length > 0) {
+      await update(ref(db), stripUndefinedDeep(updates));
+    }
+  } catch {
+    // Non-blocking sync
+  }
+}
+
+/**
+ * Shared calculation for Total Applicable Working Days:
+ * - Includes recorded attendance dates and registered working days
+ * - Strictly excludes holidays/non-working days
+ * - Strictly excludes future dates (> todayStr)
+ * - Deduplicates dates
+ */
+export function computeApplicableWorkingDates(
+  allAttendance: Record<string, Record<string, AttendanceRecord>>,
+  workingDays: Record<string, WorkingDayConfig>,
+  todayStr: string
+): string[] {
+  const dateSet = new Set<string>();
+
+  Object.keys(allAttendance || {}).forEach((d) => {
+    if (!d || d > todayStr) return;
+    const dayMap = allAttendance[d];
+    if (dayMap && Object.values(dayMap).some((r) => r && !r.isDeleted)) {
+      dateSet.add(d);
+    }
+  });
+
+  Object.keys(workingDays || {}).forEach((d) => {
+    if (!d || d > todayStr) return;
+    const cfg = workingDays[d];
+    if (cfg && !cfg.isHoliday) {
+      dateSet.add(d);
+    }
+  });
+
+  // Remove any explicitly marked holidays
+  Object.keys(workingDays || {}).forEach((d) => {
+    if (workingDays[d]?.isHoliday) {
+      dateSet.delete(d);
+    }
+  });
+
+  return Array.from(dateSet).sort();
+}
+
 export function subscribeToDateAttendance(
   dateStr: string,
   onSuccess: (records: Record<string, AttendanceRecord>) => void,
   onError?: (err: Error) => void
 ) {
-  try {
-    const db = getFirebaseDatabase();
-    const attendanceRef = ref(db, `attendance/${dateStr}`);
-    const unsubscribe = onValue(
-      attendanceRef,
-      (snapshot: DataSnapshot) => {
-        const val = snapshot.val();
-        if (val) {
-          onSuccess(val);
-        } else {
-          onSuccess({});
+  return subscribeToStudents(
+    (studentsMap) => {
+      const result: Record<string, AttendanceRecord> = {};
+      Object.entries(studentsMap || {}).forEach(([rfidKey, st]) => {
+        if (!st || !st.attendance) return;
+        const cardUid = (st.uid || rfidKey).trim().toUpperCase();
+        const rawRec = st.attendance[dateStr];
+        if (rawRec && !rawRec.isDeleted) {
+          result[cardUid] = normalizeAttendanceRecord(
+            {
+              ...rawRec,
+              studentName: rawRec.studentName || st.name,
+              studentId: rawRec.studentId || st.studentId,
+              department: rawRec.department || st.department,
+              authUid: rawRec.authUid || st.authUid,
+            },
+            dateStr,
+            cardUid
+          );
         }
-      },
-      (error) => {
-        console.warn(`Realtime Database attendance for ${dateStr} error:`, error);
-        onError?.(error);
-      }
-    );
-    return () => off(attendanceRef, 'value', unsubscribe);
-  } catch (error) {
-    console.error('Failed to subscribe to attendance', error);
-    onError?.(error as Error);
-    return () => {};
-  }
+      });
+      onSuccess(result);
+    },
+    onError
+  );
 }
 
 export function subscribeToAllAttendance(
   onSuccess: (recordsByDate: Record<string, Record<string, AttendanceRecord>>) => void,
   onError?: (err: Error) => void
 ) {
-  try {
-    const db = getFirebaseDatabase();
-    const attendanceRef = ref(db, 'attendance');
-    const unsubscribe = onValue(
-      attendanceRef,
-      (snapshot: DataSnapshot) => {
-        const val = snapshot.val();
-        if (val) {
-          onSuccess(val);
-        } else {
-          onSuccess({});
-        }
-      },
-      (error) => {
-        console.warn('Realtime Database all attendance error:', error);
-        onError?.(error);
-      }
-    );
-    return () => off(attendanceRef, 'value', unsubscribe);
-  } catch (error) {
-    console.error('Failed to subscribe to all attendance', error);
-    onError?.(error as Error);
-    return () => {};
-  }
+  return subscribeToStudents(
+    (studentsMap) => {
+      const recordsByDate: Record<string, Record<string, AttendanceRecord>> = {};
+      Object.entries(studentsMap || {}).forEach(([rfidKey, st]) => {
+        if (!st || !st.attendance) return;
+        const cardUid = (st.uid || rfidKey).trim().toUpperCase();
+        Object.entries(st.attendance).forEach(([dateKey, rawRec]) => {
+          if (!rawRec) return;
+          if (!recordsByDate[dateKey]) {
+            recordsByDate[dateKey] = {};
+          }
+          recordsByDate[dateKey][cardUid] = normalizeAttendanceRecord(
+            {
+              ...rawRec,
+              studentName: rawRec.studentName || st.name,
+              studentId: rawRec.studentId || st.studentId,
+              department: rawRec.department || st.department,
+              authUid: rawRec.authUid || st.authUid,
+            },
+            dateKey,
+            cardUid
+          );
+        });
+      });
+      onSuccess(recordsByDate);
+    },
+    onError
+  );
 }
 
 /**
- * Record attendance from ESP32 or portal.
- * Validates against known student list.
- * Prevents duplicate attendance on the same day.
+ * Record attendance from ESP32 or portal directly into students/{RFID_UID}/attendance/{DATE}.
+ * Validates UID normalization, student existence, active status, suspension expiry, overrides, and duplicates.
  */
 export async function recordAttendanceScan(
   uidInput: string,
@@ -414,21 +705,28 @@ export async function recordAttendanceScan(
   }
 ): Promise<{ success: boolean; message: string; record?: AttendanceRecord }> {
   const uid = uidInput.trim().toUpperCase();
+  if (!uid || !/^[A-Z0-9_-]{4,32}$/.test(uid)) {
+    return {
+      success: false,
+      message: `Invalid RFID UID format [${uidInput}]. Expected valid hex card identifier.`,
+    };
+  }
+
   const now = options?.customTimestamp ? new Date(options.customTimestamp) : new Date();
-  const dateStr = now.toISOString().split('T')[0];
-  const timeStr = now.toTimeString().split(' ')[0];
+  const dateStr = getISTDateStr(now);
+  const timeStr = getISTTimeStr(now);
 
   const db = getFirebaseDatabase();
-  const attendanceDayRef = ref(db, `attendance/${dateStr}/${uid}`);
+  const studentRef = ref(db, `students/${uid}`);
+  const studentAttRef = ref(db, `students/${uid}/attendance/${dateStr}`);
 
-  // Check if student exists
+  // 1. Find the student using students/{RFID_UID}
   let student: Student | null = null;
   if (options?.studentsLookup && options.studentsLookup[uid]) {
     student = options.studentsLookup[uid];
   } else {
-    // Fetch directly from DB
     try {
-      const studentSnap = await get(ref(db, `students/${uid}`));
+      const studentSnap = await get(studentRef);
       if (studentSnap.exists()) {
         student = studentSnap.val();
       }
@@ -437,65 +735,9 @@ export async function recordAttendanceScan(
     }
   }
 
-  // 1. Suspension Check: Verify if student is currently suspended
-  if (student && (student.status === 'suspended' || student.isSuspended)) {
-    const activeSusp = student.activeSuspension;
-    if (activeSusp && activeSusp.endDate && dateStr > activeSusp.endDate) {
-      // Suspension has expired! Automatically reactivate student in database
-      student.status = 'active';
-      student.isSuspended = false;
-      student.activeSuspension = undefined;
-      try {
-        await update(ref(db, `students/${uid}`), {
-          status: 'active',
-          isSuspended: false,
-          activeSuspension: null,
-        });
-        await update(ref(db, `suspensions/${uid}/${activeSusp.id}`), {
-          status: 'expired',
-        });
-      } catch (err) {
-        console.warn('Auto reactivation notice during scan:', err);
-      }
-    } else {
-      // Suspension is ACTIVE: reject RFID attendance recording
-      const reasonMsg = activeSusp?.reason || 'Disciplinary suspension in effect.';
-      const endMsg = activeSusp?.endDate ? ` until ${activeSusp.endDate}` : '';
-      return {
-        success: false,
-        message: `ACCESS DENIED: Student ${student.name} is currently SUSPENDED${endMsg}. Attendance cannot be registered. Reason: ${reasonMsg}`,
-      };
-    }
-  }
-
-  // 2. Attendance Lock & Duplicate Check on the same day
-  try {
-    const existingSnap = await get(attendanceDayRef);
-    if (existingSnap.exists()) {
-      const existing = existingSnap.val() as AttendanceRecord;
-
-      // Prevent subsequent RFID scans from overriding admin's manual Absent decision
-      if (existing.isOverridden && existing.status === 'Absent') {
-        return {
-          success: false,
-          message: `Attendance Locked: Admin manually marked ${student ? student.name : uid} as Absent on ${dateStr} (${existing.overrideReason || 'Administrative override'}). Subsequent RFID scans cannot override this decision.`,
-          record: existing,
-        };
-      }
-
-      return {
-        success: false,
-        message: `Duplicate Tap: ${student ? student.name : uid} was already marked ${existing.status} at ${existing.time}. Duplicate entry prevented.`,
-        record: existing,
-      };
-    }
-  } catch (e) {
-    console.warn('Duplicate & override check query warning', e);
-  }
-
-  // Unknown RFID card rejection
+  // 2. Reject unknown RFID cards (never auto-register unknown cards)
   if (!student) {
-    const unknownRecord: AttendanceRecord = {
+    const unknownRecord: AttendanceRecord = stripUndefinedDeep({
       uid,
       studentName: 'UNKNOWN CARD',
       timestamp: now.getTime(),
@@ -504,9 +746,8 @@ export async function recordAttendanceScan(
       status: 'Unknown',
       device: options?.device || 'ESP32-READER-01',
       notes: 'Card not registered in student database. Access Denied.',
-    };
+    });
 
-    // Log to unknown_scans for security audits
     try {
       const alertRef = ref(db, `unknown_scans/${now.getTime()}`);
       await set(alertRef, unknownRecord);
@@ -521,13 +762,50 @@ export async function recordAttendanceScan(
     };
   }
 
-  // Resolve student auth UID
+  // 3. Reject inactive student accounts
+  if (student.status === 'inactive') {
+    return {
+      success: false,
+      message: `ACCESS DENIED: Student ${student.name} (${uid}) account is INACTIVE. Attendance cannot be registered.`,
+    };
+  }
+
+  // 4. Suspension Check: Prevent suspended students from marking attendance
+  if (student.status === 'suspended' || student.isSuspended) {
+    const activeSusp = student.activeSuspension;
+    if (activeSusp && activeSusp.endDate && dateStr > activeSusp.endDate) {
+      // Suspension has expired: automatically restore active status
+      student.status = 'active';
+      student.isSuspended = false;
+      student.activeSuspension = undefined;
+      try {
+        await update(studentRef, {
+          status: 'active',
+          isSuspended: false,
+          activeSuspension: null,
+        });
+        await update(ref(db, `suspensions/${uid}/${activeSusp.id}`), {
+          status: 'expired',
+        });
+      } catch (err) {
+        console.warn('Auto reactivation notice during scan:', err);
+      }
+    } else {
+      const reasonMsg = activeSusp?.reason || 'Disciplinary suspension in effect.';
+      const endMsg = activeSusp?.endDate ? ` until ${activeSusp.endDate}` : '';
+      return {
+        success: false,
+        message: `ACCESS DENIED: Student ${student.name} is currently SUSPENDED${endMsg}. Attendance cannot be registered. Reason: ${reasonMsg}`,
+      };
+    }
+  }
+
+  // 5. Resolve student Auth UID and build validated record
   const studentAuthUid = student.authUid || 
     (KNOWN_STUDENT_AUTH_ACCOUNTS[uid] ? KNOWN_STUDENT_AUTH_ACCOUNTS[uid].uid : '') ||
     Object.values(KNOWN_STUDENT_AUTH_ACCOUNTS).find((acc) => acc.rfidUID.toUpperCase() === uid)?.uid || '';
 
-  // Create valid attendance record
-  const record: AttendanceRecord = {
+  const record: AttendanceRecord = stripUndefinedDeep({
     uid,
     rfidUID: uid,
     studentRfid: uid,
@@ -542,41 +820,65 @@ export async function recordAttendanceScan(
     timestamp: now.getTime(),
     status: 'Present',
     device: options?.device || 'ESP32-RFID-01',
-  };
+  });
 
-  // 1. Write to Realtime Database date/uid tree (ESP32 structure)
-  await set(attendanceDayRef, record);
+  const validationError = validateAttendancePayload(record);
+  if (validationError) {
+    return {
+      success: false,
+      message: `Validation rejected scan payload: ${validationError}`,
+    };
+  }
 
-  // 2. Write to Realtime Database student-specific tree
+  // 6. Atomic duplicate & admin-override protection via RTDB runTransaction
+  let blockedReason: 'overridden' | 'duplicate' | null = null;
+  let existingRecordFound: AttendanceRecord | undefined = undefined;
+
+  const txResult = await runTransaction(studentAttRef, (currentVal) => {
+    if (currentVal && !currentVal.isDeleted) {
+      const existing = currentVal as AttendanceRecord;
+      existingRecordFound = existing;
+      if (existing.isOverridden && existing.status === 'Absent') {
+        blockedReason = 'overridden';
+      } else {
+        blockedReason = 'duplicate';
+      }
+      return undefined; // Abort transaction without overwriting
+    }
+    return record;
+  });
+
+  if (!txResult.committed) {
+    const existing = existingRecordFound || (txResult.snapshot.val() as AttendanceRecord | undefined);
+    if (blockedReason === 'overridden' || (existing?.isOverridden && existing?.status === 'Absent')) {
+      return {
+        success: false,
+        message: `Attendance Locked: Admin manually marked ${student.name} as Absent on ${dateStr} (${existing?.overrideReason || 'Administrative override'}). Subsequent RFID scans cannot override this decision.`,
+        record: existing,
+      };
+    }
+
+    return {
+      success: false,
+      message: `Duplicate Tap: ${student.name} was already marked ${existing?.status || 'Present'} at ${existing?.time || timeStr}. Duplicate entry prevented.`,
+      record: existing,
+    };
+  }
+
+  // Register date as an institutional working day if not already marked as holiday
   try {
-    await set(ref(db, `students_attendance/${uid}/${dateStr}`), record);
-    if (studentAuthUid) {
-      await set(ref(db, `users/${studentAuthUid}/attendance/${dateStr}`), record);
+    const wdRef = ref(db, `working_days/${dateStr}`);
+    const wdSnap = await get(wdRef);
+    if (!wdSnap.exists()) {
+      await set(wdRef, {
+        date: dateStr,
+        isHoliday: false,
+        label: 'Institutional Working Day',
+        updatedAt: now.getTime(),
+      });
     }
   } catch {
     // Non-blocking
-  }
-
-  // 3. Write to Firestore attendance collection
-  try {
-    const fs = getFirebaseFirestore();
-    const docId = `${dateStr}_${uid}`;
-    await withTimeout(
-      setDoc(doc(fs, 'attendance', docId), {
-        ...record,
-        id: docId,
-        recordId: docId,
-        rfidUID: uid,
-        uid: uid,
-        studentRfid: uid,
-        authUid: studentAuthUid,
-        userId: studentAuthUid,
-      }, { merge: true }),
-      2500,
-      null
-    );
-  } catch (fsErr) {
-    console.warn('Firestore attendance record write notice:', fsErr);
   }
 
   // Update ESP32 device status
@@ -669,15 +971,14 @@ export async function reverifyAdminPassword(
 
 /**
  * OPTION A: Reset Attendance Data
- * Strictly deletes ONLY the /attendance node from Firebase Realtime Database
- * using remove(ref(database, "attendance")).
- * Does NOT delete the database root, /students, Firebase Authentication users, or other data.
+ * Strictly deletes ONLY nested attendance under /students/{uid}/attendance, /working_days,
+ * /attendance_trash, and /unknown_scans.
+ * Preserves all student profiles, RFID UIDs, and Firebase Authentication accounts.
  */
 export async function resetAttendanceData(
   adminUid: string,
   adminEmail: string
 ): Promise<{ success: boolean; message: string }> {
-  // 1 & 2: Authenticate currently logged-in administrator & verify UID
   const auth = getFirebaseAuth();
   if (!auth.currentUser) {
     throw new Error('AUTH_ERROR: No administrator is currently authenticated.');
@@ -686,15 +987,27 @@ export async function resetAttendanceData(
     throw new Error(`UID_MISMATCH: Authenticated user (${auth.currentUser.uid}) is not authorized as Administrator.`);
   }
 
-  // 6: Ensure same initialized database instance as the dashboard
   const db = getFirebaseDatabase();
-  const attendanceRef = ref(db, 'attendance');
 
-  // 3 & 4: Delete ONLY the /attendance node
   try {
-    await remove(attendanceRef);
+    const studentsSnap = await get(ref(db, 'students'));
+    if (studentsSnap.exists()) {
+      const studentsVal = studentsSnap.val() as Record<string, any>;
+      for (const uid of Object.keys(studentsVal)) {
+        try {
+          await remove(ref(db, `students/${uid}/attendance`));
+        } catch (err) {
+          console.warn(`Could not clear attendance for student ${uid}:`, err);
+        }
+      }
+    }
 
-    // Optional audit log (non-blocking)
+    // Clear working_days, trash, and unknown scans
+    try { await remove(ref(db, 'working_days')); } catch {}
+    try { await remove(ref(db, 'attendance_trash')); } catch {}
+    try { await remove(ref(db, 'unknown_scans')); } catch {}
+
+    // Audit log (non-blocking)
     try {
       const now = Date.now();
       const auditRecord: ResetAuditLog = {
@@ -702,8 +1015,8 @@ export async function resetAttendanceData(
         adminEmail,
         initiatedByUid: adminUid,
         timestamp: now,
-        timestampStr: new Date().toLocaleString(),
-        description: 'All attendance records deleted from /attendance node. Students and accounts preserved.',
+        timestampStr: getISTTimestampDisplay(now),
+        description: 'All student attendance records deleted from students/*/attendance. Student profiles and accounts preserved.',
       };
       await set(ref(db, `auditLogs/resets/${now}`), auditRecord);
       await set(ref(db, 'auditLogs/lastReset'), auditRecord);
@@ -713,13 +1026,12 @@ export async function resetAttendanceData(
 
     return {
       success: true,
-      message: 'Attendance records successfully deleted from /attendance node. Student directory and accounts remain intact.',
+      message: 'Attendance records successfully deleted from students/*/attendance. Student directory and accounts remain intact.',
     };
   } catch (err: any) {
-    // 7: Display actual Firebase error code and message
-    console.error('Firebase remove error on /attendance:', err);
+    console.error('Firebase remove error on students/*/attendance:', err);
     const code = err.code || 'PERMISSION_DENIED';
-    const message = err.message || 'Permission denied at /attendance';
+    const message = err.message || 'Permission denied clearing student attendance';
     throw new Error(`${code}: ${message}`);
   }
 }
@@ -1294,6 +1606,7 @@ export function normalizeAttendanceRecord(
   }
 
   return {
+    ...(rawRecord || {}),
     uid: rfidUID,
     rfidUID,
     studentRfid: rfidUID,
@@ -1323,15 +1636,8 @@ export interface CentralAttendanceUserTarget {
 }
 
 /**
- * Single Centralized Attendance Subscription for Admin and Student Portals.
- * - Both Admin and Student Portals fetch attendance from the same attendance database/table.
- * - Does not create separate attendance records or duplicate tables for students.
- * - Maps logged-in student's unique student ID (e.g. STU-2024-002) and RFID UID (0A37B224).
- * - Enriches every record with student ID, RFID UID, date, time, and attendance status.
- * - For Admin: emits all institutional attendance records.
- * - For Student: filters to ONLY display the authenticated student's personal verified records,
- *   while preserving institutional date keys for accurate total working days, present, and absent calculations.
- * - Updates in real time when ESP32 scans an RFID card without requiring manual refresh or re-login.
+ * Unified Attendance Subscription for Admin and Student Portals.
+ * Single Source of Truth: students/{RFID_UID}/attendance/{YYYY-MM-DD} + working_days/{YYYY-MM-DD}.
  */
 export function subscribeToCentralAttendance(
   user: CentralAttendanceUserTarget,
@@ -1344,267 +1650,129 @@ export function subscribeToCentralAttendance(
   const unsubs: (() => void)[] = [];
   const db = getFirebaseDatabase();
 
-  const now = new Date();
-  const localToday = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-  const utcToday = now.toISOString().split('T')[0];
-
-  // Resolve student identifiers if student
-  const resolved = lookupStudentInfo(user.rfidUID || '') || 
-                   lookupStudentInfo(user.studentId || user.rollNumber || '') || 
-                   lookupStudentInfo(user.uid) || 
+  const resolved = lookupStudentInfo(user.rfidUID || '') ||
+                   lookupStudentInfo(user.studentId || user.rollNumber || '') ||
+                   lookupStudentInfo(user.uid) ||
                    (user.email ? lookupStudentInfo(user.email) : null);
 
   const studentRfid = (user.rfidUID || resolved?.rfidUID || '').trim().toUpperCase();
-  const studentId = (user.studentId || user.rollNumber || resolved?.studentId || '').trim().toUpperCase();
-  const studentAuthUid = user.uid;
-
-  const isStudentMatch = (rec: AttendanceRecord): boolean => {
-    const cardUid = (rec.rfidUID || rec.uid || rec.studentRfid || '').toUpperCase();
-    if (studentRfid && cardUid === studentRfid) return true;
-    if (studentId && (rec.studentId?.toUpperCase() === studentId || rec.rollNumber?.toUpperCase() === studentId)) return true;
-    if (studentAuthUid && (rec.authUid === studentAuthUid || rec.userId === studentAuthUid)) return true;
-    if (user.email && rec.notes && rec.notes.toLowerCase().includes(user.email.toLowerCase())) return true;
-    if (resolved?.name && rec.studentName && rec.studentName.trim().toLowerCase() === resolved.name.trim().toLowerCase()) return true;
-    return false;
-  };
 
   if (user.role === 'admin') {
-    // -------------------------------------------------------------
-    // ADMIN: Listen to centralized attendance table in Realtime Database
-    // -------------------------------------------------------------
-    const attendanceRef = ref(db, 'attendance');
-    const unsubRtdb = onValue(
-      attendanceRef,
-      (snapshot: DataSnapshot) => {
-        const val = snapshot.val() || {};
+    const unsubStudents = subscribeToStudents(
+      (studentsMap) => {
+        const istToday = getISTDateStr();
         const allMap: Record<string, Record<string, AttendanceRecord>> = {};
         const todayMap: Record<string, AttendanceRecord> = {};
+        const discoveredDates = new Set<string>();
 
-        Object.keys(val).forEach((dateKey) => {
-          allMap[dateKey] = {};
-          const dayData = val[dateKey];
-          if (dayData && typeof dayData === 'object') {
-            Object.keys(dayData).forEach((rfidKey) => {
-              const rec = normalizeAttendanceRecord(dayData[rfidKey], dateKey, rfidKey);
-              const cardKey = (rec.rfidUID || rec.uid || rfidKey).toUpperCase();
-              allMap[dateKey][cardKey] = rec;
-
-              if (dateKey === localToday || dateKey === utcToday) {
-                todayMap[cardKey] = rec;
-              }
-
-              // Background non-blocking Firestore mirror to keep databases completely unified
-              try {
-                const fs = getFirebaseFirestore();
-                const docId = `${dateKey}_${cardKey}`;
-                withTimeout(
-                  setDoc(doc(fs, 'attendance', docId), {
-                    ...rec,
-                    id: docId,
-                    recordId: docId,
-                  }, { merge: true }),
-                  2000,
-                  null
-                ).catch(() => {});
-              } catch {}
-            });
-          }
+        Object.entries(studentsMap || {}).forEach(([rfidKey, st]) => {
+          if (!st || !st.attendance) return;
+          const cardUid = (st.uid || rfidKey).trim().toUpperCase();
+          Object.entries(st.attendance).forEach(([dateKey, rawRec]) => {
+            if (!rawRec || rawRec.isDeleted) return;
+            discoveredDates.add(dateKey);
+            const rec = normalizeAttendanceRecord(
+              {
+                ...rawRec,
+                studentName: rawRec.studentName || st.name,
+                studentId: rawRec.studentId || st.studentId,
+                department: rawRec.department || st.department,
+                authUid: rawRec.authUid || st.authUid,
+              },
+              dateKey,
+              cardUid
+            );
+            if (!allMap[dateKey]) allMap[dateKey] = {};
+            allMap[dateKey][cardUid] = rec;
+            if (dateKey === istToday) {
+              todayMap[cardUid] = rec;
+            }
+          });
         });
+
+        if (discoveredDates.size > 0) {
+          syncWorkingDaysFromDates(Array.from(discoveredDates)).catch(() => {});
+        }
 
         onAttendanceUpdate(allMap, todayMap);
       },
       (error) => {
-        console.warn('Admin RTDB attendance subscription notice:', error);
+        console.warn('Admin unified students attendance subscription notice:', error);
         onError?.(error);
       }
     );
-    unsubs.push(() => off(attendanceRef, 'value', unsubRtdb));
+    unsubs.push(unsubStudents);
   } else {
-    // -------------------------------------------------------------
-    // STUDENT: Fetch attendance from the SAME attendance table
-    // -------------------------------------------------------------
-    let rootSubscriptionSuccessful = false;
-    const personalAttendanceMap: Record<string, Record<string, AttendanceRecord>> = {};
-    const personalTodayMap: Record<string, AttendanceRecord> = {};
+    // STUDENT: Listen strictly to own node students/{studentRfid} + shared working_days
+    let currentStudentData: Student | null = null;
+    let currentWorkingDays: Record<string, WorkingDayConfig> = {};
 
-    const emitStudentUpdate = () => {
-      // If personalTodayMap is empty but the student has verified records,
-      // map their most recent recorded check-in into personalTodayMap
-      if (Object.keys(personalTodayMap).length === 0) {
-        const allPersonal: AttendanceRecord[] = [];
-        Object.values(personalAttendanceMap).forEach((dayRecords) => {
-          Object.values(dayRecords).forEach((r) => {
-            if (r.status === 'Present') allPersonal.push(r);
-          });
-        });
-        if (allPersonal.length > 0) {
-          allPersonal.sort((a, b) => b.timestamp - a.timestamp);
-          const latest = allPersonal[0];
-          const primaryKey = (studentRfid || latest.rfidUID || latest.uid || 'STUDENT').toUpperCase();
-          personalTodayMap[primaryKey] = latest;
+    const emitStudentState = () => {
+      const istToday = getISTDateStr();
+      const personalMap: Record<string, Record<string, AttendanceRecord>> = {};
+      const todayMap: Record<string, AttendanceRecord> = {};
+
+      // Seed institutional working dates from working_days so denominator matches Admin Portal
+      Object.keys(currentWorkingDays || {}).forEach((d) => {
+        if (!currentWorkingDays[d]?.isHoliday && d <= istToday) {
+          personalMap[d] = {};
         }
-      }
-
-      onAttendanceUpdate({ ...personalAttendanceMap }, { ...personalTodayMap });
-    };
-
-    const mergePersonalRecord = (rec: AttendanceRecord) => {
-      const dateKey = rec.date;
-      if (!personalAttendanceMap[dateKey]) {
-        personalAttendanceMap[dateKey] = {};
-      }
-      const primaryKey = (studentRfid || rec.rfidUID || rec.uid || 'STUDENT').toUpperCase();
-      personalAttendanceMap[dateKey][primaryKey] = rec;
-
-      // Check if today or latest
-      if (dateKey === localToday || dateKey === utcToday) {
-        personalTodayMap[primaryKey] = rec;
-      }
-      emitStudentUpdate();
-    };
-
-    // 1. Attempt root /attendance listener (single centralized source)
-    const attendanceRef = ref(db, 'attendance');
-    const unsubRtdb = onValue(
-      attendanceRef,
-      (snapshot: DataSnapshot) => {
-        rootSubscriptionSuccessful = true;
-        const val = snapshot.val() || {};
-
-        // Reset and rebuild maps
-        Object.keys(personalAttendanceMap).forEach((k) => delete personalAttendanceMap[k]);
-        Object.keys(personalTodayMap).forEach((k) => delete personalTodayMap[k]);
-
-        Object.keys(val).forEach((dateKey) => {
-          // Preserve institutional date for statistics calculation
-          personalAttendanceMap[dateKey] = {};
-
-          const dayData = val[dateKey];
-          if (dayData && typeof dayData === 'object') {
-            Object.keys(dayData).forEach((rfidKey) => {
-              const isPathKeyMatch = Boolean(studentRfid && rfidKey.trim().toUpperCase() === studentRfid);
-              if (isPathKeyMatch) {
-                const rec = normalizeAttendanceRecord(dayData[rfidKey], dateKey, rfidKey);
-                mergePersonalRecord(rec);
-              } else {
-                const rec = normalizeAttendanceRecord(dayData[rfidKey], dateKey, rfidKey);
-                if (isStudentMatch(rec)) {
-                  mergePersonalRecord(rec);
-                }
-              }
-            });
-          }
-        });
-
-        emitStudentUpdate();
-      },
-      (error) => {
-        // If root /attendance gives permission denied, activate resilient child listeners & polling
-        console.warn('Student root attendance listener notice (activating child listeners):', error?.message);
-        activateChildListeners();
-      }
-    );
-    unsubs.push(() => off(attendanceRef, 'value', unsubRtdb));
-
-    // Fallback: child listeners & polling when root is restricted
-    const activateChildListeners = () => {
-      if (rootSubscriptionSuccessful) return;
-
-      // Build broad list of dates (today, UTC today, and past 14 days)
-      const listenDatesSet = new Set<string>([localToday, utcToday, '2026-11-08']);
-      const nowD = new Date();
-      for (let i = 1; i <= 14; i++) {
-        const d = new Date(nowD);
-        d.setDate(d.getDate() - i);
-        listenDatesSet.add(d.toISOString().split('T')[0]);
-      }
-      const listenDates = Array.from(listenDatesSet);
-
-      const listenRfids = Array.from(
-        new Set([
-          studentRfid, 
-          studentRfid.toLowerCase(), 
-        ])
-      ).filter(Boolean);
-
-      // Listen directly to child path attendance/{date}/{rfid}
-      listenDates.forEach((dStr) => {
-        listenRfids.forEach((idKey) => {
-          const childRef = ref(db, `attendance/${dStr}/${idKey}`);
-          const unsubChild = onValue(
-            childRef,
-            (snap) => {
-              if (snap.exists()) {
-                const rec = normalizeAttendanceRecord(snap.val(), dStr, idKey);
-                mergePersonalRecord(rec);
-              }
-            },
-            (err) => {
-              console.warn(`Student child attendance notice ${dStr}/${idKey}:`, err?.message);
-            }
-          );
-          unsubs.push(() => off(childRef, 'value', unsubChild));
-        });
       });
 
-      // Active 2.5s real-time polling on today's child node
-      if (studentRfid) {
-        const pollInterval = setInterval(async () => {
-          try {
-            const snap = await get(ref(db, `attendance/${localToday}/${studentRfid}`));
-            if (snap.exists()) {
-              const rec = normalizeAttendanceRecord(snap.val(), localToday, studentRfid);
-              mergePersonalRecord(rec);
-            }
-          } catch {}
-        }, 2500);
-        unsubs.push(() => clearInterval(pollInterval));
-      }
+      const attObj = currentStudentData?.attendance || {};
 
-      // Query past 30 days once for complete history
-      for (let i = 1; i <= 30; i++) {
-        const d = new Date(nowD);
-        d.setDate(d.getDate() - i);
-        const pastDateStr = d.toISOString().split('T')[0];
-        if (studentRfid) {
-          get(ref(db, `attendance/${pastDateStr}/${studentRfid}`))
-            .then((snap) => {
-              if (snap.exists()) {
-                const rec = normalizeAttendanceRecord(snap.val(), pastDateStr, studentRfid);
-                mergePersonalRecord(rec);
-              }
-            })
-            .catch(() => {});
+      Object.entries(attObj).forEach(([dateKey, rawRec]) => {
+        if (!rawRec || rawRec.isDeleted) return;
+        const rec = normalizeAttendanceRecord(
+          {
+            ...rawRec,
+            studentName: rawRec.studentName || currentStudentData?.name || user.displayName,
+            studentId: rawRec.studentId || currentStudentData?.studentId || user.studentId,
+            department: rawRec.department || currentStudentData?.department,
+            authUid: rawRec.authUid || currentStudentData?.authUid || user.uid,
+          },
+          dateKey,
+          studentRfid
+        );
+
+        if (!personalMap[dateKey]) personalMap[dateKey] = {};
+        personalMap[dateKey][studentRfid] = rec;
+
+        // Strictly only place today's IST attendance into todayMap
+        if (dateKey === istToday) {
+          todayMap[studentRfid] = rec;
         }
-      }
+      });
 
-      // Firestore onSnapshot listener
-      try {
-        const fs = getFirebaseFirestore();
-        const attCol = collection(fs, 'attendance');
-
-        const handleFsSnap = (snapshot: any) => {
-          snapshot.docChanges().forEach((change: any) => {
-            const docData = change.doc.data();
-            if (docData) {
-              const rec = normalizeAttendanceRecord(docData, docData.date || localToday, docData.rfidUID || studentRfid);
-              if (isStudentMatch(rec)) {
-                mergePersonalRecord(rec);
-              }
-            }
-          });
-        };
-
-        if (studentRfid) {
-          unsubs.push(onSnapshot(query(attCol, where('rfidUID', '==', studentRfid)), handleFsSnap, () => {}));
-          unsubs.push(onSnapshot(query(attCol, where('rfidUid', '==', studentRfid)), handleFsSnap, () => {}));
-          unsubs.push(onSnapshot(query(attCol, where('uid', '==', studentRfid)), handleFsSnap, () => {}));
-        }
-        if (studentAuthUid) {
-          unsubs.push(onSnapshot(query(attCol, where('authUid', '==', studentAuthUid)), handleFsSnap, () => {}));
-        }
-      } catch {}
+      onAttendanceUpdate(personalMap, todayMap);
     };
+
+    if (studentRfid) {
+      const studentNodeRef = ref(db, `students/${studentRfid}`);
+      const unsubStudent = onValue(
+        studentNodeRef,
+        (snap: DataSnapshot) => {
+          currentStudentData = snap.exists() ? (snap.val() as Student) : null;
+          emitStudentState();
+        },
+        (err) => {
+          console.warn(`Student unified node listener notice (students/${studentRfid}):`, err?.message);
+          onError?.(err);
+        }
+      );
+      unsubs.push(() => off(studentNodeRef, 'value', unsubStudent));
+    }
+
+    const unsubWorkingDays = subscribeToWorkingDays(
+      (wd) => {
+        currentWorkingDays = wd || {};
+        emitStudentState();
+      },
+      () => {
+        // Non-blocking if working_days not yet accessible
+      }
+    );
+    unsubs.push(unsubWorkingDays);
   }
 
   return () => {
@@ -1617,9 +1785,7 @@ export function subscribeToCentralAttendance(
 }
 
 /**
- * Explicitly re-fetches attendance records directly from Firebase (Realtime Database and Firestore).
- * Guarantees fresh data is fetched on demand even if real-time web socket listeners fail or drop.
- * Synchronizes student portals (Shakir 0A37B224, Zaheer 8A75B525) with the central Admin attendance records.
+ * Direct on-demand re-fetch from Firebase Unified Students Tree (students/{RFID_UID}/attendance/{DATE}).
  */
 export async function fetchDirectAttendance(
   user: CentralAttendanceUserTarget
@@ -1627,207 +1793,106 @@ export async function fetchDirectAttendance(
   allAttendance: Record<string, Record<string, AttendanceRecord>>;
   todayAttendance: Record<string, AttendanceRecord>;
   recordCount: number;
+  studentNode?: Student | null;
+  workingDays?: Record<string, WorkingDayConfig>;
 }> {
   const db = getFirebaseDatabase();
-  const fs = getFirebaseFirestore();
+  const istToday = getISTDateStr();
 
-  const now = new Date();
-  const localToday = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-  const utcToday = now.toISOString().split('T')[0];
-
-  const resolved = lookupStudentInfo(user.rfidUID || '') || 
-                   lookupStudentInfo(user.studentId || user.rollNumber || '') || 
-                   lookupStudentInfo(user.uid) || 
+  const resolved = lookupStudentInfo(user.rfidUID || '') ||
+                   lookupStudentInfo(user.studentId || user.rollNumber || '') ||
+                   lookupStudentInfo(user.uid) ||
                    (user.email ? lookupStudentInfo(user.email) : null);
 
   const studentRfid = (user.rfidUID || resolved?.rfidUID || '').trim().toUpperCase();
-  const studentId = (user.studentId || user.rollNumber || resolved?.studentId || '').trim().toUpperCase();
-  const studentAuthUid = user.uid;
-
-  const isStudentMatch = (rec: AttendanceRecord): boolean => {
-    const cardUid = (rec.rfidUID || rec.uid || rec.studentRfid || '').toUpperCase();
-    if (studentRfid && cardUid === studentRfid) return true;
-    if (studentId && (rec.studentId?.toUpperCase() === studentId || rec.rollNumber?.toUpperCase() === studentId)) return true;
-    if (studentAuthUid && (rec.authUid === studentAuthUid || rec.userId === studentAuthUid)) return true;
-    if (user.email && rec.notes && rec.notes.toLowerCase().includes(user.email.toLowerCase())) return true;
-    if (resolved?.name && rec.studentName && rec.studentName.trim().toLowerCase() === resolved.name.trim().toLowerCase()) return true;
-    return false;
-  };
 
   const allMap: Record<string, Record<string, AttendanceRecord>> = {};
   const todayMap: Record<string, AttendanceRecord> = {};
-  const uniqueRecordsMap = new Map<string, AttendanceRecord>();
+  let workingDays: Record<string, WorkingDayConfig> = {};
+  let recordCount = 0;
+  let studentNode: Student | null = null;
 
-  const registerRecord = (rec: AttendanceRecord) => {
-    const dateKey = rec.date;
-    const cardKey = (rec.rfidUID || rec.uid || studentRfid || 'STUDENT').toUpperCase();
-    const uniqueKey = `${dateKey}_${cardKey}`;
-
-    if (!allMap[dateKey]) {
-      allMap[dateKey] = {};
+  try {
+    const wdSnap = await withTimeout(get(ref(db, 'working_days')), 2500, null);
+    if (wdSnap && wdSnap.exists && wdSnap.exists()) {
+      workingDays = wdSnap.val() || {};
     }
-    allMap[dateKey][cardKey] = rec;
-    uniqueRecordsMap.set(uniqueKey, rec);
-
-    if (dateKey === localToday || dateKey === utcToday) {
-      todayMap[cardKey] = rec;
-    }
-  };
+  } catch {}
 
   if (user.role === 'admin') {
-    // 1. Admin: fetch root /attendance from RTDB
-    try {
-      const snap = await withTimeout(get(ref(db, 'attendance')), 4000, null);
-      if (snap && snap.exists && snap.exists()) {
-        const val = snap.val() || {};
-        Object.keys(val).forEach((dateKey) => {
-          allMap[dateKey] = {};
-          const dayData = val[dateKey];
-          if (dayData && typeof dayData === 'object') {
-            Object.keys(dayData).forEach((rfidKey) => {
-              const rec = normalizeAttendanceRecord(dayData[rfidKey], dateKey, rfidKey);
-              registerRecord(rec);
-            });
+    const snap = await withTimeout(get(ref(db, 'students')), 4500, null);
+    if (snap && snap.exists && snap.exists()) {
+      const studentsMap = snap.val() as Record<string, Student>;
+      Object.entries(studentsMap).forEach(([rfidKey, st]) => {
+        if (!st || !st.attendance) return;
+        const cardUid = (st.uid || rfidKey).trim().toUpperCase();
+        Object.entries(st.attendance).forEach(([dateKey, rawRec]) => {
+          if (!rawRec || rawRec.isDeleted) return;
+          const rec = normalizeAttendanceRecord(
+            {
+              ...rawRec,
+              studentName: rawRec.studentName || st.name,
+              studentId: rawRec.studentId || st.studentId,
+              department: rawRec.department || st.department,
+              authUid: rawRec.authUid || st.authUid,
+            },
+            dateKey,
+            cardUid
+          );
+          if (!allMap[dateKey]) allMap[dateKey] = {};
+          allMap[dateKey][cardUid] = rec;
+          recordCount++;
+          if (dateKey === istToday) {
+            todayMap[cardUid] = rec;
           }
         });
+      });
+    }
+  } else if (studentRfid) {
+    Object.keys(workingDays).forEach((d) => {
+      if (!workingDays[d]?.isHoliday && d <= istToday) {
+        allMap[d] = {};
       }
-    } catch (e) {
-      console.warn('Direct admin RTDB attendance fetch notice:', e);
-    }
+    });
 
-    // 2. Also check Firestore attendance collection
-    try {
-      const fsSnap = await withTimeout(getDocs(collection(fs, 'attendance')), 3000, null);
-      if (fsSnap && fsSnap.docs) {
-        fsSnap.docs.forEach((d: any) => {
-          const docData = d.data();
-          if (docData) {
-            const rec = normalizeAttendanceRecord(docData, docData.date || localToday, docData.rfidUID || d.id);
-            registerRecord(rec);
-          }
-        });
-      }
-    } catch (e) {
-      console.warn('Direct admin Firestore attendance fetch notice:', e);
-    }
-  } else {
-    // -----------------------------------------------------------------
-    // STUDENT (Shakir, Zaheer, etc.): Fetch from centralized database
-    // -----------------------------------------------------------------
-    try {
-      const snap = await withTimeout(get(ref(db, 'attendance')), 3000, null);
-      if (snap && snap.exists && snap.exists()) {
-        const val = snap.val() || {};
-        Object.keys(val).forEach((dateKey) => {
-          allMap[dateKey] = {}; // preserve institutional working day date
-          const dayData = val[dateKey];
-          if (dayData && typeof dayData === 'object') {
-            Object.keys(dayData).forEach((rfidKey) => {
-              const rec = normalizeAttendanceRecord(dayData[rfidKey], dateKey, rfidKey);
-              if (isStudentMatch(rec)) {
-                registerRecord(rec);
-              }
-            });
-          }
-        });
-      }
-    } catch (e) {
-      console.warn('Direct student root RTDB attendance fetch notice:', e);
-    }
-
-    // Direct child queries for student (works even if root is rule-restricted)
-    const targetRfids = [studentRfid, studentRfid.toLowerCase()].filter(Boolean);
-    const targetDates = [localToday, utcToday];
-    
-    // Check past 30 days
-    const pastDates: string[] = [];
-    for (let i = 1; i <= 30; i++) {
-      const d = new Date(now);
-      d.setDate(d.getDate() - i);
-      pastDates.push(d.toISOString().split('T')[0]);
-    }
-
-    const allDatesToCheck = Array.from(new Set([...targetDates, ...pastDates]));
-
-    // Check RTDB date child nodes
-    for (const dStr of allDatesToCheck) {
-      for (const rfidKey of targetRfids) {
-        try {
-          const childSnap = await withTimeout(get(ref(db, `attendance/${dStr}/${rfidKey}`)), 1200, null);
-          if (childSnap && childSnap.exists && childSnap.exists()) {
-            const rec = normalizeAttendanceRecord(childSnap.val(), dStr, rfidKey);
-            registerRecord(rec);
-          }
-        } catch {}
-      }
-    }
-
-    // Check RTDB students_attendance/{studentRfid}
-    if (studentRfid) {
-      try {
-        const studentTreeSnap = await withTimeout(get(ref(db, `students_attendance/${studentRfid}`)), 2000, null);
-        if (studentTreeSnap && studentTreeSnap.exists && studentTreeSnap.exists()) {
-          const val = studentTreeSnap.val() || {};
-          Object.keys(val).forEach((dKey) => {
-            const rec = normalizeAttendanceRecord(val[dKey], dKey, studentRfid);
-            registerRecord(rec);
-          });
+    const snap = await withTimeout(get(ref(db, `students/${studentRfid}`)), 4500, null);
+    if (snap && snap.exists && snap.exists()) {
+      studentNode = snap.val() as Student;
+      const attObj = studentNode.attendance || {};
+      Object.entries(attObj).forEach(([dateKey, rawRec]) => {
+        if (!rawRec || rawRec.isDeleted) return;
+        const rec = normalizeAttendanceRecord(
+          {
+            ...rawRec,
+            studentName: rawRec.studentName || studentNode?.name,
+            studentId: rawRec.studentId || studentNode?.studentId,
+            department: rawRec.department || studentNode?.department,
+            authUid: rawRec.authUid || studentNode?.authUid || user.uid,
+          },
+          dateKey,
+          studentRfid
+        );
+        if (!allMap[dateKey]) allMap[dateKey] = {};
+        allMap[dateKey][studentRfid] = rec;
+        recordCount++;
+        if (dateKey === istToday) {
+          todayMap[studentRfid] = rec;
         }
-      } catch {}
-    }
-
-    // Check Firestore attendance collection for this student
-    try {
-      const attCol = collection(fs, 'attendance');
-      const queries = [];
-      if (studentRfid) {
-        queries.push(query(attCol, where('rfidUID', '==', studentRfid)));
-        queries.push(query(attCol, where('rfidUid', '==', studentRfid)));
-        queries.push(query(attCol, where('uid', '==', studentRfid)));
-      }
-      if (studentAuthUid) {
-        queries.push(query(attCol, where('authUid', '==', studentAuthUid)));
-        queries.push(query(attCol, where('userId', '==', studentAuthUid)));
-      }
-
-      for (const q of queries) {
-        try {
-          const qSnap = await withTimeout(getDocs(q), 2000, null);
-          if (qSnap && qSnap.docs) {
-            qSnap.docs.forEach((docSnap: any) => {
-              const docData = docSnap.data();
-              if (docData) {
-                const rec = normalizeAttendanceRecord(docData, docData.date || localToday, docData.rfidUID || studentRfid);
-                registerRecord(rec);
-              }
-            });
-          }
-        } catch {}
-      }
-    } catch {}
-  }
-
-  // If todayMap is empty for student but the student has verified attendance records,
-  // map the latest check-in to todayMap under the student's RFID key
-  if (user.role === 'student' && Object.keys(todayMap).length === 0 && uniqueRecordsMap.size > 0) {
-    const list = Array.from(uniqueRecordsMap.values()).filter((r) => r.status === 'Present');
-    if (list.length > 0) {
-      list.sort((a, b) => b.timestamp - a.timestamp);
-      const latest = list[0];
-      const cardKey = (studentRfid || latest.rfidUID || latest.uid || 'STUDENT').toUpperCase();
-      todayMap[cardKey] = latest;
+      });
     }
   }
 
   return {
     allAttendance: allMap,
     todayAttendance: todayMap,
-    recordCount: uniqueRecordsMap.size,
+    recordCount,
+    studentNode,
+    workingDays,
   };
 }
 
 /**
- * Legacy wrapper: Subscribe to real-time attendance records for a specific student.
+ * Subscribe to real-time attendance records for a specific student from unified node.
  */
 export function subscribeToStudentAttendance(
   target: StudentSubscriptionTarget | string,
@@ -1867,7 +1932,7 @@ export function subscribeToStudentAttendance(
 }
 
 /**
- * Subscribe to today's attendance record for a specific student's RFID UID
+ * Subscribe to today's attendance record for a specific student at students/{RFID_UID}/attendance/{DATE}
  */
 export function subscribeToStudentTodayAttendance(
   dateStr: string,
@@ -1877,16 +1942,19 @@ export function subscribeToStudentTodayAttendance(
   try {
     const db = getFirebaseDatabase();
     const upperRfid = rfidUID.trim().toUpperCase();
-    const todayRecordRef = ref(db, `attendance/${dateStr}/${upperRfid}`);
+    const todayRecordRef = ref(db, `students/${upperRfid}/attendance/${dateStr}`);
 
     const unsubscribe = onValue(
       todayRecordRef,
       (snapshot: DataSnapshot) => {
         if (snapshot.exists()) {
-          onUpdate(normalizeAttendanceRecord(snapshot.val(), dateStr, upperRfid));
-        } else {
-          onUpdate(null);
+          const val = snapshot.val();
+          if (val && !val.isDeleted) {
+            onUpdate(normalizeAttendanceRecord(val, dateStr, upperRfid));
+            return;
+          }
         }
+        onUpdate(null);
       },
       (error) => {
         console.warn('Realtime Database student today attendance listener notice:', error?.message);
@@ -1903,7 +1971,8 @@ export function subscribeToStudentTodayAttendance(
 
 /**
  * OPTION B: Complete System Reset
- * Deletes attendance records, student records, and sends reset command to ESP32.
+ * Deletes unified students (including nested attendance), working_days, trash, suspensions, unknown_scans,
+ * and dispatches reset command to ESP32.
  */
 export async function completeSystemReset(
   adminUid: string,
@@ -1911,50 +1980,11 @@ export async function completeSystemReset(
 ): Promise<{ success: boolean; message: string; commandId: string }> {
   const db = getFirebaseDatabase();
   const now = Date.now();
-  const timestampStr = new Date().toLocaleString();
+  const timestampStr = getISTTimestampDisplay(now);
   const commandId = `cmd_${now}_${Math.random().toString(36).substring(2, 7)}`;
 
   try {
-    // 1. Delete all attendance records (with granular fallback)
-    let rootAttDeleted = false;
-    try {
-      await remove(ref(db, 'attendance'));
-      rootAttDeleted = true;
-    } catch (rootErr: any) {
-      console.warn('Root /attendance deletion blocked; attempting granular deletion:', rootErr?.message);
-    }
-
-    if (!rootAttDeleted) {
-      try {
-        const snap = await get(ref(db, 'attendance'));
-        if (snap.exists()) {
-          const datesData = snap.val() as Record<string, any>;
-          for (const dateKey of Object.keys(datesData)) {
-            let dateDeleted = false;
-            try {
-              await remove(ref(db, `attendance/${dateKey}`));
-              dateDeleted = true;
-            } catch {
-              // Ignore
-            }
-
-            if (!dateDeleted && datesData[dateKey] && typeof datesData[dateKey] === 'object') {
-              for (const uidKey of Object.keys(datesData[dateKey])) {
-                try {
-                  await remove(ref(db, `attendance/${dateKey}/${uidKey}`));
-                } catch {
-                  // Ignore
-                }
-              }
-            }
-          }
-        }
-      } catch {
-        // Non-blocking fallback
-      }
-    }
-
-    // 2. Delete all student records (with granular fallback)
+    // 1. Delete all student records (including unified nested attendance)
     let studentsDeleted = false;
     try {
       await remove(ref(db, 'students'));
@@ -1981,14 +2011,13 @@ export async function completeSystemReset(
       }
     }
 
-    // 3. Clear unknown scans
-    try {
-      await remove(ref(db, 'unknown_scans'));
-    } catch {
-      // Non-blocking
-    }
+    // 2. Clear auxiliary nodes
+    try { await remove(ref(db, 'working_days')); } catch {}
+    try { await remove(ref(db, 'attendance_trash')); } catch {}
+    try { await remove(ref(db, 'suspensions')); } catch {}
+    try { await remove(ref(db, 'unknown_scans')); } catch {}
 
-    // 4. Send reset command to ESP32 via deviceCommands/esp32
+    // 3. Send reset command to ESP32 via deviceCommands/esp32
     const deviceCmd: DeviceCommand = {
       command: 'RESET_SYSTEM',
       commandId,
@@ -2002,30 +2031,28 @@ export async function completeSystemReset(
       console.warn('Could not write deviceCommands/esp32 (check rules):', cmdErr?.message);
     }
 
-    // 5. Log audit record (non-blocking if auditLogs is not in rules)
+    // 4. Log audit record
     const auditRecord: ResetAuditLog = {
       type: 'COMPLETE_SYSTEM_RESET',
       adminEmail,
       initiatedByUid: adminUid,
       timestamp: now,
       timestampStr,
-      description: 'Complete system reset executed: All attendance and student data deleted. ESP32 reset signal dispatched.',
+      description: 'Complete system reset executed: All unified student profiles and nested attendance records deleted. ESP32 reset signal dispatched.',
     };
     try {
       await set(ref(db, `auditLogs/resets/${now}`), auditRecord);
       await set(ref(db, 'auditLogs/lastReset'), auditRecord);
     } catch (auditErr: any) {
-      console.warn('Could not write audit log (check rules):', auditErr?.message);
+      console.warn('Could not write audit log:', auditErr?.message);
       try {
         localStorage.setItem('rfid_last_reset_audit', JSON.stringify(auditRecord));
-      } catch {
-        // Ignore
-      }
+      } catch {}
     }
 
     return {
       success: true,
-      message: 'Complete System Reset executed. All student and attendance data removed. Reset signal dispatched to ESP32.',
+      message: 'Complete System Reset executed. All unified student and attendance data removed. Reset signal dispatched to ESP32.',
       commandId,
     };
   } catch (err: any) {
@@ -2097,7 +2124,7 @@ export async function logAuditActivity(
   const db = getFirebaseDatabase();
   const logId = `audit_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
   const now = new Date();
-  const auditEntry: AuditActivityLog = {
+  const auditEntry: AuditActivityLog = stripUndefinedDeep({
     id: logId,
     action,
     studentRfid: data.studentRfid,
@@ -2107,13 +2134,13 @@ export async function logAuditActivity(
     adminEmail: adminUser.email || 'admin@portal.local',
     adminUid: adminUser.uid || 'admin',
     timestamp: now.getTime(),
-    timestampStr: `${now.toISOString().split('T')[0]} ${now.toTimeString().split(' ')[0]}`,
+    timestampStr: getISTTimestampDisplay(now),
     reason: data.reason || 'Administrative action',
     details: data.details,
     previousValues: data.previousValues,
     updatedValues: data.updatedValues,
     affectedCount: data.affectedCount || 1,
-  };
+  });
 
   try {
     await set(ref(db, `audit_logs/${logId}`), auditEntry);
@@ -2211,7 +2238,7 @@ export function subscribeToSuspensions(
 }
 
 /**
- * Edit an attendance record's date, time, status, or notes.
+ * Edit an attendance record's date, time, status, or notes at students/{RFID_UID}/attendance/{DATE}.
  * Preserves edit history and creates an audit entry.
  */
 export async function updateAttendanceRecord(
@@ -2229,7 +2256,7 @@ export async function updateAttendanceRecord(
 ): Promise<{ success: boolean; updatedRecord: AttendanceRecord; previousRecord: AttendanceRecord }> {
   const db = getFirebaseDatabase();
   const uid = uidInput.trim().toUpperCase();
-  const oldRef = ref(db, `attendance/${date}/${uid}`);
+  const oldRef = ref(db, `students/${uid}/attendance/${date}`);
   const snap = await get(oldRef);
 
   if (!snap.exists()) {
@@ -2239,7 +2266,6 @@ export async function updateAttendanceRecord(
   const existing = snap.val() as AttendanceRecord;
   const targetDate = updates.date || date;
 
-  // Append to previousEdits history
   const prevEdits = existing.previousEdits || [];
   prevEdits.unshift({
     editedAt: Date.now(),
@@ -2254,8 +2280,11 @@ export async function updateAttendanceRecord(
     },
   });
 
-  const updatedRecord: AttendanceRecord = {
+  const updatedRecord: AttendanceRecord = stripUndefinedDeep({
     ...existing,
+    uid,
+    rfidUID: uid,
+    studentRfid: uid,
     date: targetDate,
     time: updates.time || existing.time,
     status: updates.status || existing.status,
@@ -2264,25 +2293,22 @@ export async function updateAttendanceRecord(
     lastModifiedBy: adminUser.email || 'admin',
     lastModifiedAt: Date.now(),
     previousEdits: prevEdits,
-  };
+  });
 
-  // If date changed, remove from old path and place in new path
+  const validationError = validateAttendancePayload(updatedRecord);
+  if (validationError) {
+    throw new Error(`Invalid attendance update: ${validationError}`);
+  }
+
   if (targetDate !== date) {
     await remove(oldRef);
-    await set(ref(db, `attendance/${targetDate}/${uid}`), updatedRecord);
+    await set(ref(db, `students/${uid}/attendance/${targetDate}`), updatedRecord);
   } else {
     await set(oldRef, updatedRecord);
   }
 
-  // Update students_attendance child tree
-  try {
-    await set(ref(db, `students_attendance/${uid}/${targetDate}`), updatedRecord);
-    if (targetDate !== date) {
-      await remove(ref(db, `students_attendance/${uid}/${date}`));
-    }
-  } catch {}
+  await syncWorkingDaysFromDates([targetDate]);
 
-  // Log activity
   await logAuditActivity('EDIT_ATTENDANCE', adminUser, {
     studentRfid: uid,
     studentName: existing.studentName,
@@ -2317,7 +2343,7 @@ export async function deleteAttendanceRecord(
 ): Promise<{ success: boolean; deletedRecord: AttendanceRecord; trashId: string }> {
   const db = getFirebaseDatabase();
   const uid = uidInput.trim().toUpperCase();
-  const targetRef = ref(db, `attendance/${date}/${uid}`);
+  const targetRef = ref(db, `students/${uid}/attendance/${date}`);
   const snap = await get(targetRef);
 
   if (!snap.exists()) {
@@ -2327,28 +2353,20 @@ export async function deleteAttendanceRecord(
   const existing = snap.val() as AttendanceRecord;
   const trashId = `${date}_${uid}`;
 
-  const trashEntry: TrashAttendanceRecord = {
+  const trashEntry: TrashAttendanceRecord = stripUndefinedDeep({
     ...existing,
+    uid,
     trashId,
     deletedAt: Date.now(),
     deletedBy: adminUser.email || 'admin',
     deleteReason: reason || 'Deleted by administrator',
-    originalPath: `attendance/${date}/${uid}`,
+    originalPath: `students/${uid}/attendance/${date}`,
     isDeleted: true,
-  };
+  });
 
-  // 1. Move to trash
   await set(ref(db, `attendance_trash/${trashId}`), trashEntry);
-
-  // 2. Remove from active attendance
   await remove(targetRef);
 
-  // 3. Remove from students_attendance
-  try {
-    await remove(ref(db, `students_attendance/${uid}/${date}`));
-  } catch {}
-
-  // 4. Log audit
   await logAuditActivity('DELETE_ATTENDANCE', adminUser, {
     studentRfid: uid,
     studentName: existing.studentName,
@@ -2375,30 +2393,29 @@ export async function bulkDeleteAttendance(
   for (const r of records) {
     const cleanUid = r.uid.trim().toUpperCase();
     try {
-      const snap = await get(ref(db, `attendance/${r.date}/${cleanUid}`));
+      const targetRef = ref(db, `students/${cleanUid}/attendance/${r.date}`);
+      const snap = await get(targetRef);
       if (snap.exists()) {
         const existing = snap.val() as AttendanceRecord;
         const trashId = `${r.date}_${cleanUid}`;
-        const trashEntry: TrashAttendanceRecord = {
+        const trashEntry: TrashAttendanceRecord = stripUndefinedDeep({
           ...existing,
+          uid: cleanUid,
           trashId,
           deletedAt: Date.now(),
           deletedBy: adminUser.email || 'admin',
           deleteReason: reason || 'Bulk deletion by administrator',
-          originalPath: `attendance/${r.date}/${cleanUid}`,
+          originalPath: `students/${cleanUid}/attendance/${r.date}`,
           isDeleted: true,
-        };
+        });
 
         await set(ref(db, `attendance_trash/${trashId}`), trashEntry);
-        await remove(ref(db, `attendance/${r.date}/${cleanUid}`));
-        try {
-          await remove(ref(db, `students_attendance/${cleanUid}/${r.date}`));
-        } catch {}
+        await remove(targetRef);
 
         deletedRecords.push(existing);
       }
     } catch (err) {
-      console.warn(`Failed deleting record ${r.date}/${cleanUid}:`, err);
+      console.warn(`Failed deleting record students/${cleanUid}/attendance/${r.date}:`, err);
     }
   }
 
@@ -2427,7 +2444,7 @@ export async function bulkUpdateAttendanceStatus(
   for (const r of records) {
     const cleanUid = r.uid.trim().toUpperCase();
     try {
-      const targetRef = ref(db, `attendance/${r.date}/${cleanUid}`);
+      const targetRef = ref(db, `students/${cleanUid}/attendance/${r.date}`);
       const snap = await get(targetRef);
       if (snap.exists()) {
         const existing = snap.val() as AttendanceRecord;
@@ -2447,21 +2464,19 @@ export async function bulkUpdateAttendanceStatus(
           },
         });
 
-        const updated: AttendanceRecord = {
+        const updated: AttendanceRecord = stripUndefinedDeep({
           ...existing,
+          uid: cleanUid,
           status: newStatus,
           lastModifiedBy: adminUser.email || 'admin',
           lastModifiedAt: Date.now(),
           previousEdits: prevEdits,
-        };
+        });
 
         await set(targetRef, updated);
-        try {
-          await set(ref(db, `students_attendance/${cleanUid}/${r.date}`), updated);
-        } catch {}
       }
     } catch (err) {
-      console.warn(`Failed bulk updating ${r.date}/${cleanUid}:`, err);
+      console.warn(`Failed bulk updating students/${cleanUid}/attendance/${r.date}:`, err);
     }
   }
 
@@ -2477,7 +2492,7 @@ export async function bulkUpdateAttendanceStatus(
 }
 
 /**
- * Restore an attendance record from attendance_trash back into active attendance.
+ * Restore an attendance record from attendance_trash back into students/{RFID_UID}/attendance/{DATE}.
  */
 export async function restoreDeletedAttendance(
   trashId: string,
@@ -2495,28 +2510,34 @@ export async function restoreDeletedAttendance(
   const date = trashEntry.date;
   const uid = (trashEntry.rfidUID || trashEntry.uid).toUpperCase();
 
-  const restoredRecord: AttendanceRecord = {
-    ...trashEntry,
+  // Omit trash-only & deleted metadata cleanly instead of passing undefined to RTDB set()
+  const {
+    trashId: _tid,
+    originalPath: _op,
+    deletedAt: _da,
+    deletedBy: _db,
+    deleteReason: _dr,
+    ...baseFields
+  } = trashEntry;
+
+  const restoredRecord: AttendanceRecord = stripUndefinedDeep({
+    ...baseFields,
+    uid,
+    rfidUID: uid,
     isDeleted: false,
-    deletedAt: undefined,
-    deletedBy: undefined,
-    deleteReason: undefined,
     lastModifiedBy: adminUser.email || 'admin',
     lastModifiedAt: Date.now(),
-  };
+  });
 
-  // 1. Restore to active attendance
-  await set(ref(db, `attendance/${date}/${uid}`), restoredRecord);
+  const validationError = validateAttendancePayload(restoredRecord);
+  if (validationError) {
+    throw new Error(`Cannot restore invalid record: ${validationError}`);
+  }
 
-  // 2. Restore to students_attendance
-  try {
-    await set(ref(db, `students_attendance/${uid}/${date}`), restoredRecord);
-  } catch {}
-
-  // 3. Remove from trash
+  await set(ref(db, `students/${uid}/attendance/${date}`), restoredRecord);
+  await syncWorkingDaysFromDates([date]);
   await remove(trashRef);
 
-  // 4. Log audit
   await logAuditActivity('RESTORE_ATTENDANCE', adminUser, {
     studentRfid: uid,
     studentName: restoredRecord.studentName,
@@ -2540,11 +2561,11 @@ export async function restorePreviousAttendance(
 ): Promise<{ success: boolean; restoredRecord: AttendanceRecord }> {
   const db = getFirebaseDatabase();
   const uid = uidInput.trim().toUpperCase();
-  const targetRef = ref(db, `attendance/${date}/${uid}`);
+  const targetRef = ref(db, `students/${uid}/attendance/${date}`);
   const snap = await get(targetRef);
 
   if (!snap.exists()) {
-    throw new Error(`Record ${date}/${uid} not found.`);
+    throw new Error(`Record ${uid}/attendance/${date} not found.`);
   }
 
   const existing = snap.val() as AttendanceRecord;
@@ -2556,7 +2577,7 @@ export async function restorePreviousAttendance(
   }
 
   const prevData = targetVersion.prevData;
-  const updatedRecord: AttendanceRecord = {
+  const updatedRecord: AttendanceRecord = stripUndefinedDeep({
     ...existing,
     date: prevData.date,
     time: prevData.time,
@@ -2565,7 +2586,7 @@ export async function restorePreviousAttendance(
     notes: prevData.notes !== undefined ? prevData.notes : existing.notes,
     lastModifiedBy: adminUser.email || 'admin',
     lastModifiedAt: Date.now(),
-  };
+  });
 
   await set(targetRef, updatedRecord);
 
@@ -2574,7 +2595,7 @@ export async function restorePreviousAttendance(
     studentName: existing.studentName,
     studentId: existing.studentId,
     date,
-    reason: `Restored to version edited on ${new Date(targetVersion.editedAt).toLocaleString()}`,
+    reason: `Restored to version edited on ${getISTTimestampDisplay(targetVersion.editedAt)}`,
     previousValues: existing,
     updatedValues: updatedRecord,
   });
@@ -2583,7 +2604,7 @@ export async function restorePreviousAttendance(
 }
 
 /**
- * Override student's status to Absent (Manual Override).
+ * Override student's status to Absent (Manual Override) at students/{RFID_UID}/attendance/{DATE}.
  * Preserves original scan data and prevents subsequent ESP32 RFID scans from overriding it for that date.
  */
 export async function overrideAttendanceToAbsent(
@@ -2594,7 +2615,7 @@ export async function overrideAttendanceToAbsent(
 ): Promise<{ success: boolean; updatedRecord: AttendanceRecord; previousRecord: AttendanceRecord }> {
   const db = getFirebaseDatabase();
   const uid = uidInput.trim().toUpperCase();
-  const targetRef = ref(db, `attendance/${date}/${uid}`);
+  const targetRef = ref(db, `students/${uid}/attendance/${date}`);
   const snap = await get(targetRef);
 
   if (!snap.exists()) {
@@ -2609,8 +2630,9 @@ export async function overrideAttendanceToAbsent(
     device: existing.device,
   };
 
-  const updatedRecord: AttendanceRecord = {
+  const updatedRecord: AttendanceRecord = stripUndefinedDeep({
     ...existing,
+    uid,
     status: 'Absent',
     isOverridden: true,
     overrideReason: reason || 'Manual administrative override to Absent',
@@ -2619,13 +2641,9 @@ export async function overrideAttendanceToAbsent(
     originalRecord,
     lastModifiedBy: adminUser.email || 'admin',
     lastModifiedAt: Date.now(),
-  };
+  });
 
   await set(targetRef, updatedRecord);
-
-  try {
-    await set(ref(db, `students_attendance/${uid}/${date}`), updatedRecord);
-  } catch {}
 
   await logAuditActivity('OVERRIDE_ATTENDANCE', adminUser, {
     studentRfid: uid,
@@ -2650,7 +2668,7 @@ export async function removeAttendanceOverride(
 ): Promise<{ success: boolean; updatedRecord: AttendanceRecord }> {
   const db = getFirebaseDatabase();
   const uid = uidInput.trim().toUpperCase();
-  const targetRef = ref(db, `attendance/${date}/${uid}`);
+  const targetRef = ref(db, `students/${uid}/attendance/${date}`);
   const snap = await get(targetRef);
 
   if (!snap.exists()) {
@@ -2660,23 +2678,24 @@ export async function removeAttendanceOverride(
   const existing = snap.val() as AttendanceRecord;
   const original = existing.originalRecord;
 
-  const updatedRecord: AttendanceRecord = {
-    ...existing,
+  const {
+    overrideReason: _or,
+    overrideBy: _ob,
+    overrideAt: _oa,
+    ...restFields
+  } = existing;
+
+  const updatedRecord: AttendanceRecord = stripUndefinedDeep({
+    ...restFields,
+    uid,
     status: original?.status || 'Present',
     time: original?.time || existing.time,
     isOverridden: false,
-    overrideReason: undefined,
-    overrideBy: undefined,
-    overrideAt: undefined,
     lastModifiedBy: adminUser.email || 'admin',
     lastModifiedAt: Date.now(),
-  };
+  });
 
   await set(targetRef, updatedRecord);
-
-  try {
-    await set(ref(db, `students_attendance/${uid}/${date}`), updatedRecord);
-  } catch {}
 
   await logAuditActivity('REMOVE_OVERRIDE', adminUser, {
     studentRfid: uid,
@@ -2714,7 +2733,7 @@ export async function suspendStudent(
   }
 
   const suspId = `susp_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-  const suspension: StudentSuspension = {
+  const suspension: StudentSuspension = stripUndefinedDeep({
     id: suspId,
     studentRfid: rfid,
     studentName: student?.name || info?.name || 'Student',
@@ -2726,7 +2745,7 @@ export async function suspendStudent(
     suspendedBy: adminUser.email || 'admin',
     createdAt: Date.now(),
     status: 'active',
-  };
+  });
 
   // 1. Record suspension in /suspensions/{rfid}/{suspId}
   await set(ref(db, `suspensions/${rfid}/${suspId}`), suspension);
@@ -2801,7 +2820,7 @@ export async function unsuspendStudent(
  */
 export async function checkAndReactivateExpiredSuspensions(): Promise<number> {
   const db = getFirebaseDatabase();
-  const nowStr = new Date().toISOString().split('T')[0];
+  const nowStr = getISTDateStr();
   let reactivatedCount = 0;
 
   try {
@@ -2834,7 +2853,7 @@ export async function checkAndReactivateExpiredSuspensions(): Promise<number> {
 }
 
 /**
- * Execute an undo action, restoring the previous state before an edit, delete, or override.
+ * Execute an undo action, restoring the previous state on students/{RFID_UID}/attendance/{DATE}.
  */
 export async function executeUndoAction(
   action: UndoAction,
@@ -2846,18 +2865,20 @@ export async function executeUndoAction(
     case 'EDIT': {
       const prevRec = action.revertData.previousRecord as AttendanceRecord;
       const curRec = action.revertData.updatedRecord as AttendanceRecord;
-      // If date was changed, delete from new date
+      const cleanCurUid = (curRec.rfidUID || curRec.uid).toUpperCase();
+      const cleanPrevUid = (prevRec.rfidUID || prevRec.uid).toUpperCase();
       if (curRec.date !== prevRec.date) {
-        await remove(ref(db, `attendance/${curRec.date}/${curRec.uid.toUpperCase()}`));
+        await remove(ref(db, `students/${cleanCurUid}/attendance/${curRec.date}`));
       }
-      await set(ref(db, `attendance/${prevRec.date}/${prevRec.uid.toUpperCase()}`), prevRec);
+      await set(ref(db, `students/${cleanPrevUid}/attendance/${prevRec.date}`), stripUndefinedDeep(prevRec));
       break;
     }
 
     case 'DELETE': {
       const deleted = action.revertData.deletedRecord as AttendanceRecord;
+      const cleanUid = (deleted.rfidUID || deleted.uid).toUpperCase();
       const trashId = action.revertData.trashId as string;
-      await set(ref(db, `attendance/${deleted.date}/${deleted.uid.toUpperCase()}`), deleted);
+      await set(ref(db, `students/${cleanUid}/attendance/${deleted.date}`), stripUndefinedDeep(deleted));
       if (trashId) {
         await remove(ref(db, `attendance_trash/${trashId}`));
       }
@@ -2866,7 +2887,8 @@ export async function executeUndoAction(
 
     case 'OVERRIDE': {
       const prevRec = action.revertData.previousRecord as AttendanceRecord;
-      await set(ref(db, `attendance/${prevRec.date}/${prevRec.uid.toUpperCase()}`), prevRec);
+      const cleanUid = (prevRec.rfidUID || prevRec.uid).toUpperCase();
+      await set(ref(db, `students/${cleanUid}/attendance/${prevRec.date}`), stripUndefinedDeep(prevRec));
       break;
     }
 
@@ -2874,7 +2896,7 @@ export async function executeUndoAction(
       const deletedRecords = action.revertData.deletedRecords as AttendanceRecord[];
       for (const rec of deletedRecords) {
         const cleanUid = (rec.rfidUID || rec.uid).toUpperCase();
-        await set(ref(db, `attendance/${rec.date}/${cleanUid}`), rec);
+        await set(ref(db, `students/${cleanUid}/attendance/${rec.date}`), stripUndefinedDeep(rec));
         await remove(ref(db, `attendance_trash/${rec.date}_${cleanUid}`));
       }
       break;
@@ -2884,11 +2906,11 @@ export async function executeUndoAction(
       const prevStates = action.revertData.previousStates as Array<{ date: string; uid: string; prevStatus: AttendanceStatus }>;
       for (const p of prevStates) {
         const cleanUid = p.uid.toUpperCase();
-        const targetRef = ref(db, `attendance/${p.date}/${cleanUid}`);
+        const targetRef = ref(db, `students/${cleanUid}/attendance/${p.date}`);
         const snap = await get(targetRef);
         if (snap.exists()) {
           const cur = snap.val() as AttendanceRecord;
-          await set(targetRef, { ...cur, status: p.prevStatus });
+          await set(targetRef, stripUndefinedDeep({ ...cur, status: p.prevStatus }));
         }
       }
       break;
@@ -2904,6 +2926,646 @@ export async function executeUndoAction(
   });
 
   return { success: true, message: `Successfully reverted: ${action.description}` };
+}
+
+// ============================================================================
+// DATABASE MIGRATION & RECOVERY ENGINE (LEGACY -> UNIFIED students/{UID})
+// ============================================================================
+
+function normalizeRfidKey(raw: string): string {
+  return raw.trim().toUpperCase();
+}
+
+function mergeAttendanceEntries(existing: any, incoming: any): any {
+  if (!existing) return incoming;
+  if (!incoming) return existing;
+  // Preserve admin overrides & edit history if present in existing
+  return {
+    ...incoming,
+    ...existing,
+    isOverridden: existing.isOverridden ?? incoming.isOverridden,
+    overrideReason: existing.overrideReason ?? incoming.overrideReason,
+    previousEdits: existing.previousEdits ?? incoming.previousEdits,
+  };
+}
+
+/**
+ * Safely inspect current Firebase Realtime Database state without modifying any data.
+ */
+export async function inspectLegacyDatabase(): Promise<MigrationInspection> {
+  const db = getFirebaseDatabase();
+
+  let studentsVal: Record<string, any> = {};
+  let legacyAttVal: Record<string, Record<string, any>> = {};
+  let legacyStuAttVal: Record<string, Record<string, any>> = {};
+  let recoveryVal: Record<string, Record<string, any>> = {};
+  let backupCount = 0;
+  let migrationCompletedAt: number | undefined = undefined;
+
+  try {
+    const sSnap = await withTimeout(get(ref(db, 'students')), 3000, null);
+    if (sSnap && sSnap.exists && sSnap.exists()) studentsVal = sSnap.val() || {};
+  } catch {}
+
+  try {
+    const aSnap = await withTimeout(get(ref(db, 'attendance')), 3000, null);
+    if (aSnap && aSnap.exists && aSnap.exists()) legacyAttVal = aSnap.val() || {};
+  } catch {}
+
+  try {
+    const saSnap = await withTimeout(get(ref(db, 'students_attendance')), 2500, null);
+    if (saSnap && saSnap.exists && saSnap.exists()) legacyStuAttVal = saSnap.val() || {};
+  } catch {}
+
+  try {
+    const recSnap = await withTimeout(get(ref(db, 'migration_recovery/unregistered_attendance')), 2500, null);
+    if (recSnap && recSnap.exists && recSnap.exists()) recoveryVal = recSnap.val() || {};
+  } catch {}
+
+  try {
+    const bSnap = await withTimeout(get(ref(db, 'database_backups')), 2000, null);
+    if (bSnap && bSnap.exists && bSnap.exists()) backupCount = Object.keys(bSnap.val() || {}).length;
+  } catch {}
+
+  try {
+    const mSnap = await withTimeout(get(ref(db, 'migration_status/unified_students_v1')), 2000, null);
+    if (mSnap && mSnap.exists && mSnap.exists()) {
+      migrationCompletedAt = mSnap.val()?.completedAt;
+    }
+  } catch {}
+
+  const normalizedStudents: Record<string, Student> = {};
+  let alreadyUnifiedCount = 0;
+  Object.entries(studentsVal).forEach(([k, st]) => {
+    const normKey = normalizeRfidKey(st?.uid || k);
+    normalizedStudents[normKey] = st;
+    if (st?.attendance && typeof st.attendance === 'object') {
+      alreadyUnifiedCount += Object.keys(st.attendance).length;
+    }
+  });
+
+  const legacyDates = Object.keys(legacyAttVal);
+  let legacyRecordCount = 0;
+  const seenPairs = new Set<string>();
+
+  legacyDates.forEach((dateKey) => {
+    const dayMap = legacyAttVal[dateKey];
+    if (dayMap && typeof dayMap === 'object') {
+      Object.keys(dayMap).forEach((uidKey) => {
+        const normUid = normalizeRfidKey(dayMap[uidKey]?.rfidUID || dayMap[uidKey]?.uid || uidKey);
+        seenPairs.add(`${dateKey}::${normUid}`);
+        legacyRecordCount++;
+      });
+    }
+  });
+
+  Object.entries(legacyStuAttVal).forEach(([uidKey, datesMap]) => {
+    const normUid = normalizeRfidKey(uidKey);
+    if (datesMap && typeof datesMap === 'object') {
+      Object.keys(datesMap).forEach((dateKey) => {
+        const pair = `${dateKey}::${normUid}`;
+        if (!seenPairs.has(pair)) {
+          seenPairs.add(pair);
+          legacyRecordCount++;
+        }
+      });
+    }
+  });
+
+  const unregisteredGroups: UnregisteredAttendanceGroup[] = [];
+  let unregisteredCount = 0;
+  Object.entries(recoveryVal).forEach(([uidKey, datesMap]) => {
+    if (datesMap && typeof datesMap === 'object') {
+      const records: Record<string, AttendanceRecord> = {};
+      let sampleName: string | undefined = undefined;
+      Object.entries(datesMap).forEach(([dKey, raw]) => {
+        const normRec = normalizeAttendanceRecord(raw, dKey, uidKey);
+        records[dKey] = normRec;
+        if (!sampleName && raw?.name) sampleName = raw.name;
+        if (!sampleName && raw?.studentName) sampleName = raw.studentName;
+      });
+      const count = Object.keys(records).length;
+      if (count > 0) {
+        unregisteredCount += count;
+        unregisteredGroups.push({
+          uid: normalizeRfidKey(uidKey),
+          records,
+          recordCount: count,
+          sampleName,
+        });
+      }
+    }
+  });
+
+  return {
+    hasLegacyAttendance: legacyRecordCount > 0,
+    legacyDateCount: legacyDates.length,
+    legacyRecordCount,
+    studentCount: Object.keys(normalizedStudents).length,
+    alreadyUnifiedCount,
+    unregisteredCount,
+    unregisteredGroups,
+    backupCount,
+    migrationCompletedAt,
+    legacyKeysSample: legacyDates.slice(0, 6),
+  };
+}
+
+/**
+ * Create a complete backup of all RTDB nodes before migration and return downloadable JSON + RTDB path.
+ */
+export async function exportCompleteDatabaseBackup(
+  adminUser?: { email?: string | null; uid?: string }
+): Promise<{ backupPath: string; jsonString: string; filename: string }> {
+  const db = getFirebaseDatabase();
+  const ts = Date.now();
+  const dateStamp = `${getISTDateStr(ts)}_${getISTTimeStr(ts).replace(/:/g, '-')}`;
+
+  const safeGet = async (path: string) => {
+    try {
+      const s = await withTimeout(get(ref(db, path)), 3500, null);
+      return s && s.exists && s.exists() ? s.val() : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const backupPayload = stripUndefinedDeep({
+    createdAt: ts,
+    createdAtIst: getISTTimestampDisplay(ts),
+    createdBy: adminUser?.email || 'admin',
+    schemaVersion: 'pre_unified_students_v1',
+    nodes: {
+      students: await safeGet('students'),
+      attendance: await safeGet('attendance'),
+      students_attendance: await safeGet('students_attendance'),
+      working_days: await safeGet('working_days'),
+      settings: await safeGet('settings'),
+      suspensions: await safeGet('suspensions'),
+      attendance_trash: await safeGet('attendance_trash'),
+      audit_logs: await safeGet('audit_logs'),
+      migration_recovery: await safeGet('migration_recovery'),
+      users: await safeGet('users'),
+      rfid_to_uid: await safeGet('rfid_to_uid'),
+    },
+  });
+
+  const backupKey = `pre_migration_${ts}`;
+  let backupPath = `database_backups/${backupKey}`;
+
+  try {
+    await set(ref(db, backupPath), backupPayload);
+  } catch {
+    backupPath = `auditLogs/backups/${backupKey}`;
+    await set(ref(db, backupPath), backupPayload);
+  }
+
+  return {
+    backupPath,
+    jsonString: JSON.stringify(backupPayload, null, 2),
+    filename: `rfid_attendance_backup_${dateStamp}.json`,
+  };
+}
+
+/**
+ * Safely migrate legacy /attendance & /students_attendance into unified students/{RFID_UID}/attendance/{DATE}.
+ * - Idempotent: never duplicates records or overwrites student personal info.
+ * - Preserves unregistered card scans under migration_recovery/unregistered_attendance/{UID}/{DATE}.
+ * - Preserves original timestamps, UIDs, dates, and times.
+ * - Verifies 100% parity before removing legacy /attendance nodes.
+ */
+export async function runUnifiedDatabaseMigration(
+  adminUser: { email?: string | null; uid?: string }
+): Promise<MigrationResult> {
+  const db = getFirebaseDatabase();
+  const errors: string[] = [];
+  const recordLogs: MigrationRecordLog[] = [];
+
+  // 1. Mandatory pre-migration backup
+  let backupPath = '';
+  try {
+    const backup = await exportCompleteDatabaseBackup(adminUser);
+    backupPath = backup.backupPath;
+  } catch (err: any) {
+    return {
+      success: false,
+      message: `Migration aborted: Pre-migration backup failed (${err?.message || 'Permission error'}).`,
+      migratedCount: 0,
+      skippedDuplicateCount: 0,
+      unregisteredCount: 0,
+      verifiedCount: 0,
+      totalLegacyCount: 0,
+      legacyRemoved: false,
+      errors: [err?.message || 'Backup write failed'],
+      recordLogs,
+    };
+  }
+
+  // 2. Read /students with timeout protection and normalize any mixed-case RFID keys cleanly
+  const studentsSnap = await withTimeout(get(ref(db, 'students')), 6000, null);
+  const rawStudents: Record<string, any> =
+    studentsSnap && studentsSnap.exists && studentsSnap.exists() ? studentsSnap.val() : {};
+  const studentRegistry: Record<string, Student> = {};
+  const lowercaseKeysToClean: string[] = [];
+
+  for (const [rawKey, rawStu] of Object.entries(rawStudents)) {
+    if (!rawStu || typeof rawStu !== 'object') continue;
+    const normKey = normalizeRfidKey(rawStu.uid || rawKey);
+    const existing = studentRegistry[normKey];
+    const mergedAttendance: Record<string, AttendanceRecord> = {
+      ...(existing?.attendance || {}),
+      ...(rawStu.attendance || {}),
+    };
+    studentRegistry[normKey] = stripUndefinedDeep({
+      ...(existing || {}),
+      ...rawStu,
+      uid: normKey,
+      ...(Object.keys(mergedAttendance).length > 0 ? { attendance: mergedAttendance } : {}),
+    });
+    if (rawKey !== normKey) {
+      lowercaseKeysToClean.push(rawKey);
+    }
+  }
+
+  // Write normalized uppercase student records first if any mixed-case keys existed
+  for (const normKey of Object.keys(studentRegistry)) {
+    if (!rawStudents[normKey] || lowercaseKeysToClean.length > 0) {
+      await set(ref(db, `students/${normKey}`), stripUndefinedDeep(studentRegistry[normKey]));
+    }
+  }
+  for (const oldKey of lowercaseKeysToClean) {
+    try {
+      await remove(ref(db, `students/${oldKey}`));
+    } catch {}
+  }
+
+  // 3. Collect all legacy records from /attendance/{date}/{uid} and /students_attendance/{uid}/{date}
+  const attSnap = await withTimeout(get(ref(db, 'attendance')), 6000, null);
+  const hasRootAttendance = Boolean(attSnap && attSnap.exists && attSnap.exists());
+  const legacyAtt: Record<string, Record<string, any>> = hasRootAttendance ? attSnap!.val() : {};
+
+  let legacyStuAtt: Record<string, Record<string, any>> = {};
+  try {
+    const saSnap = await withTimeout(get(ref(db, 'students_attendance')), 5000, null);
+    if (saSnap && saSnap.exists && saSnap.exists()) legacyStuAtt = saSnap.val();
+  } catch {}
+
+  const legacyPairs = new Map<string, { date: string; rawUid: string; normUid: string; rawRec: any }>();
+
+  Object.entries(legacyAtt).forEach(([dateKey, dayMap]) => {
+    if (!dayMap || typeof dayMap !== 'object') return;
+    Object.entries(dayMap).forEach(([uidKey, rawRec]) => {
+      if (!rawRec || typeof rawRec !== 'object') return;
+      const normUid = normalizeRfidKey(rawRec.rfidUID || rawRec.uid || uidKey);
+      const key = `${dateKey}::${normUid}`;
+      legacyPairs.set(key, { date: dateKey, rawUid: uidKey, normUid, rawRec });
+    });
+  });
+
+  Object.entries(legacyStuAtt).forEach(([uidKey, datesMap]) => {
+    if (!datesMap || typeof datesMap !== 'object') return;
+    Object.entries(datesMap).forEach(([dateKey, rawRec]) => {
+      if (!rawRec || typeof rawRec !== 'object') return;
+      const normUid = normalizeRfidKey(rawRec.rfidUID || rawRec.uid || uidKey);
+      const key = `${dateKey}::${normUid}`;
+      if (!legacyPairs.has(key)) {
+        legacyPairs.set(key, { date: dateKey, rawUid: uidKey, normUid, rawRec });
+      }
+    });
+  });
+
+  const totalLegacyCount = legacyPairs.size;
+  let migratedCount = 0;
+  let skippedDuplicateCount = 0;
+  let unregisteredCount = 0;
+
+  const expectedTargets: Array<{ targetPath: string; date: string; uid: string }> = [];
+  const discoveredWorkingDates = new Set<string>();
+
+  // 4. Route each record either to students/{UID}/attendance/{DATE} or migration_recovery/unregistered_attendance/{UID}/{DATE}
+  for (const entry of legacyPairs.values()) {
+    const { date, normUid, rawRec } = entry;
+    if (isValidDateStr(date)) {
+      discoveredWorkingDates.add(date);
+    }
+
+    // Match directly or via studentId/authUid/email/name if card key matches registered student
+    let targetStudent = studentRegistry[normUid];
+    if (!targetStudent && rawRec.studentId) {
+      targetStudent = Object.values(studentRegistry).find(
+        (s) => s.studentId?.trim().toUpperCase() === rawRec.studentId.toString().trim().toUpperCase()
+      ) as Student;
+    }
+    if (!targetStudent && rawRec.authUid) {
+      targetStudent = Object.values(studentRegistry).find(
+        (s) => s.authUid === rawRec.authUid
+      ) as Student;
+    }
+    if (!targetStudent) {
+      const infoMatch =
+        lookupStudentInfo(normUid) ||
+        (rawRec.studentName || rawRec.name ? lookupStudentInfo(rawRec.studentName || rawRec.name) : null);
+      if (infoMatch && studentRegistry[infoMatch.rfidUID.toUpperCase()]) {
+        targetStudent = studentRegistry[infoMatch.rfidUID.toUpperCase()];
+      }
+    }
+
+    try {
+      if (targetStudent) {
+        const targetUid = normalizeRfidKey(targetStudent.uid);
+        const destPath = `students/${targetUid}/attendance/${date}`;
+        const existingAtTarget = targetStudent.attendance?.[date];
+        const normalizedRec = stripUndefinedDeep(
+          normalizeAttendanceRecord(
+            {
+              ...rawRec,
+              uid: targetUid,
+              rfidUID: targetUid,
+              studentRfid: targetUid,
+              studentName: rawRec.studentName || rawRec.name || targetStudent.name,
+              studentId: rawRec.studentId || targetStudent.studentId,
+              department: rawRec.department || targetStudent.department,
+              authUid: rawRec.authUid || targetStudent.authUid || '',
+              date: rawRec.date || date,
+            },
+            date,
+            targetUid
+          )
+        );
+
+        const validationErr = validateAttendancePayload(normalizedRec);
+        if (validationErr) {
+          errors.push(`${destPath}: ${validationErr}`);
+          recordLogs.push({ uid: targetUid, date, targetPath: destPath, action: 'failed', message: validationErr });
+          continue;
+        }
+
+        if (existingAtTarget) {
+          const merged = stripUndefinedDeep(mergeAttendanceEntries(existingAtTarget, normalizedRec));
+          await set(ref(db, destPath), merged);
+          skippedDuplicateCount++;
+          recordLogs.push({
+            uid: targetUid,
+            date,
+            targetPath: destPath,
+            action: 'merged',
+            message: 'Duplicate avoided; merged with existing unified record',
+          });
+        } else {
+          await set(ref(db, destPath), normalizedRec);
+          migratedCount++;
+          recordLogs.push({
+            uid: targetUid,
+            date,
+            targetPath: destPath,
+            action: 'migrated',
+            message: `Preserved ${normalizedRec.time} (${normalizedRec.status})`,
+          });
+        }
+
+        expectedTargets.push({ targetPath: destPath, date, uid: targetUid });
+      } else {
+        // Unregistered RFID: preserve in recovery node without discarding!
+        const recPath = `migration_recovery/unregistered_attendance/${normUid}/${date}`;
+        const normalizedUnreg = stripUndefinedDeep(
+          normalizeAttendanceRecord(
+            {
+              ...rawRec,
+              uid: normUid,
+              rfidUID: normUid,
+              date: rawRec.date || date,
+            },
+            date,
+            normUid
+          )
+        );
+        await set(ref(db, recPath), normalizedUnreg);
+        unregisteredCount++;
+        expectedTargets.push({ targetPath: recPath, date, uid: normUid });
+        recordLogs.push({
+          uid: normUid,
+          date,
+          targetPath: recPath,
+          action: 'recovery',
+          message: 'Unregistered RFID archived safely in recovery vault',
+        });
+      }
+    } catch (recErr: any) {
+      const errMsg = recErr?.message || 'Write failed';
+      errors.push(`${normUid}/${date}: ${errMsg}`);
+      recordLogs.push({
+        uid: normUid,
+        date,
+        targetPath: `students/${normUid}/attendance/${date}`,
+        action: 'failed',
+        message: errMsg,
+      });
+    }
+  }
+
+  // Sync discovered dates into working_days (preserving any existing holidays)
+  if (discoveredWorkingDates.size > 0) {
+    await syncWorkingDaysFromDates(Array.from(discoveredWorkingDates));
+  }
+
+  // 5. 100% Parity Verification
+  let verifiedCount = 0;
+  for (const target of expectedTargets) {
+    try {
+      const checkSnap = await withTimeout(get(ref(db, target.targetPath)), 4000, null);
+      if (checkSnap && checkSnap.exists && checkSnap.exists()) {
+        verifiedCount++;
+      } else {
+        errors.push(`Missing verified record at ${target.targetPath}`);
+      }
+    } catch (verifyErr: any) {
+      errors.push(`Verification error at ${target.targetPath}: ${verifyErr?.message}`);
+    }
+  }
+
+  const isVerified =
+    verifiedCount === totalLegacyCount &&
+    verifiedCount === expectedTargets.length &&
+    errors.length === 0;
+  let legacyRemoved = false;
+
+  // 6. Remove legacy /attendance and /students_attendance ONLY after 100% verification passes
+  if (isVerified) {
+    if (hasRootAttendance) {
+      try {
+        await remove(ref(db, 'attendance'));
+        legacyRemoved = true;
+      } catch (rmErr: any) {
+        errors.push(`Could not remove legacy /attendance: ${rmErr?.message}`);
+      }
+    } else {
+      legacyRemoved = true;
+    }
+
+    try {
+      await remove(ref(db, 'students_attendance'));
+    } catch {}
+
+    try {
+      await set(ref(db, 'migration_status/unified_students_v1'), {
+        completedAt: Date.now(),
+        completedAtIst: getISTTimestampDisplay(),
+        completedBy: adminUser.email || 'admin',
+        backupPath,
+        migratedCount,
+        skippedDuplicateCount,
+        unregisteredCount,
+        verifiedCount,
+        totalLegacyCount,
+      });
+    } catch {}
+
+    await logAuditActivity('DATABASE_MIGRATION', adminUser, {
+      reason: 'Unified database restructuring: attendance merged into students/{RFID_UID}/attendance/{DATE}',
+      affectedCount: totalLegacyCount,
+      details: `Backup: ${backupPath} | Migrated: ${migratedCount} | Existing/Merged: ${skippedDuplicateCount} | Unregistered Recovered: ${unregisteredCount}`,
+      updatedValues: { backupPath, migratedCount, skippedDuplicateCount, unregisteredCount, verifiedCount },
+    });
+  }
+
+  return {
+    success: isVerified,
+    message: isVerified
+      ? `Migration verified (${verifiedCount}/${totalLegacyCount} records confirmed). Root /attendance safely backed up and removed.`
+      : `Verification incomplete (${verifiedCount}/${totalLegacyCount}). Legacy /attendance was NOT deleted.`,
+    backupPath,
+    migratedCount,
+    skippedDuplicateCount,
+    unregisteredCount,
+    verifiedCount,
+    totalLegacyCount,
+    legacyRemoved,
+    errors,
+    recordLogs,
+  };
+}
+
+export function subscribeToMigrationRecovery(
+  onUpdate: (groups: UnregisteredAttendanceGroup[]) => void
+): () => void {
+  try {
+    const db = getFirebaseDatabase();
+    const recRef = ref(db, 'migration_recovery/unregistered_attendance');
+    const unsubscribe = onValue(
+      recRef,
+      (snap) => {
+        if (!snap.exists()) {
+          onUpdate([]);
+          return;
+        }
+        const val = snap.val() as Record<string, Record<string, any>>;
+        const list: UnregisteredAttendanceGroup[] = [];
+        Object.entries(val).forEach(([uidKey, datesMap]) => {
+          if (!datesMap || typeof datesMap !== 'object') return;
+          const records: Record<string, AttendanceRecord> = {};
+          let sampleName: string | undefined = undefined;
+          Object.entries(datesMap).forEach(([dKey, raw]) => {
+            records[dKey] = normalizeAttendanceRecord(raw, dKey, uidKey);
+            if (!sampleName && raw?.name) sampleName = raw.name;
+            if (!sampleName && raw?.studentName) sampleName = raw.studentName;
+          });
+          const count = Object.keys(records).length;
+          if (count > 0) {
+            list.push({
+              uid: normalizeRfidKey(uidKey),
+              records,
+              recordCount: count,
+              sampleName,
+            });
+          }
+        });
+        onUpdate(list);
+      },
+      () => onUpdate([])
+    );
+    return () => off(recRef, 'value', unsubscribe);
+  } catch {
+    return () => {};
+  }
+}
+
+export async function assignRecoveredAttendanceToStudent(
+  unregisteredUidInput: string,
+  targetStudentUidInput: string,
+  adminUser: { email?: string | null; uid?: string }
+): Promise<{ success: boolean; assignedCount: number }> {
+  const db = getFirebaseDatabase();
+  const unregisteredUid = normalizeRfidKey(unregisteredUidInput);
+  const targetUid = normalizeRfidKey(targetStudentUidInput);
+
+  const studentSnap = await get(ref(db, `students/${targetUid}`));
+  if (!studentSnap.exists()) {
+    throw new Error(`Target student ${targetUid} does not exist.`);
+  }
+  const targetStudent = studentSnap.val() as Student;
+
+  const recRef = ref(db, `migration_recovery/unregistered_attendance/${unregisteredUid}`);
+  const recSnap = await get(recRef);
+  if (!recSnap.exists()) {
+    throw new Error(`No recovered records found for ${unregisteredUid}.`);
+  }
+
+  const recMap = recSnap.val() as Record<string, any>;
+  const assignedDates: string[] = [];
+
+  for (const [dateKey, rawRec] of Object.entries(recMap)) {
+    const destRef = ref(db, `students/${targetUid}/attendance/${dateKey}`);
+    const existingSnap = await get(destRef);
+    const updatedRec = normalizeAttendanceRecord(
+      {
+        ...rawRec,
+        uid: targetUid,
+        rfidUID: targetUid,
+        studentRfid: targetUid,
+        studentName: targetStudent.name,
+        studentId: targetStudent.studentId,
+        department: targetStudent.department,
+        authUid: targetStudent.authUid || '',
+        date: dateKey,
+        notes: `Recovered & reassigned from legacy UID ${unregisteredUid}`,
+      },
+      dateKey,
+      targetUid
+    );
+
+    if (existingSnap.exists()) {
+      await set(destRef, mergeAttendanceEntries(existingSnap.val(), updatedRec));
+    } else {
+      await set(destRef, updatedRec);
+    }
+    assignedDates.push(dateKey);
+  }
+
+  await syncWorkingDaysFromDates(assignedDates);
+  await remove(recRef);
+
+  await logAuditActivity('DATABASE_MIGRATION', adminUser, {
+    studentRfid: targetUid,
+    studentName: targetStudent.name,
+    studentId: targetStudent.studentId,
+    affectedCount: assignedDates.length,
+    reason: `Assigned ${assignedDates.length} recovered legacy attendance records from UID ${unregisteredUid} to ${targetStudent.name}`,
+  });
+
+  return { success: true, assignedCount: assignedDates.length };
+}
+
+export async function deleteRecoveredAttendance(
+  unregisteredUidInput: string,
+  adminUser: { email?: string | null; uid?: string }
+): Promise<void> {
+  const db = getFirebaseDatabase();
+  const unregisteredUid = normalizeRfidKey(unregisteredUidInput);
+  await remove(ref(db, `migration_recovery/unregistered_attendance/${unregisteredUid}`));
+  await logAuditActivity('DATABASE_MIGRATION', adminUser, {
+    studentRfid: unregisteredUid,
+    reason: `Dismissed unregistered recovered attendance records for unknown UID ${unregisteredUid}`,
+  });
 }
 
 

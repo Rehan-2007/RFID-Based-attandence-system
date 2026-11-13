@@ -267,7 +267,7 @@ export const SystemResetPage: React.FC = () => {
                 <div>
                   <span className="font-bold text-rose-300">What will be permanently deleted:</span>
                   <ul className="list-disc list-inside text-slate-400 text-[11px] mt-1 space-y-0.5">
-                    <li>All attendance records under <code className="text-slate-300 font-mono">attendance/*</code></li>
+                    <li>All attendance records under <code className="text-slate-300 font-mono">students/*/attendance</code> &amp; <code className="text-slate-300 font-mono">working_days/</code></li>
                     <li>Today's present and absent counts reset to 0</li>
                     <li>Weekly and monthly attendance charts reset to 0%</li>
                     <li>Live attendance activity and unknown card logs</li>
@@ -335,8 +335,8 @@ export const SystemResetPage: React.FC = () => {
                 <div>
                   <span className="font-bold text-rose-400">What will be permanently deleted:</span>
                   <ul className="list-disc list-inside text-slate-400 text-[11px] mt-1 space-y-0.5">
-                    <li>All attendance records under <code className="text-slate-300 font-mono">attendance/*</code></li>
-                    <li>All registered students under <code className="text-slate-300 font-mono">students/*</code></li>
+                    <li>All unified student profiles &amp; nested attendance under <code className="text-slate-300 font-mono">students/*</code></li>
+                    <li>All working day configurations, suspensions &amp; trash logs</li>
                     <li>Dashboard statistics, historical telemetry, and charts</li>
                     <li>ESP32 hardware runtime memory and session state</li>
                   </ul>
@@ -422,7 +422,7 @@ export const SystemResetPage: React.FC = () => {
                     <div>{errorMessage}</div>
                     {errorMessage.toLowerCase().includes('permission') && (
                       <div className="mt-2 text-[11px] text-rose-300/90 bg-rose-900/40 p-2 rounded-lg border border-rose-500/30">
-                        <strong>Security Rules Notice:</strong> Ensure Administrator UID <code className="font-mono text-cyan-300">bi3c890VUXhVE0JFxroYfnlQwea2</code> has write permission on the <code className="font-mono text-cyan-300">attendance</code> node in Firebase Console &gt; Realtime Database &gt; Rules (see Settings page for recommended rules).
+                        <strong>Security Rules Notice:</strong> Ensure Administrator UID <code className="font-mono text-cyan-300">bi3c890VUXhVE0JFxroYfnlQwea2</code> has write permission on <code className="font-mono text-cyan-300">students</code> and <code className="font-mono text-cyan-300">working_days</code> in Firebase Console &gt; Realtime Database &gt; Rules (see Settings page).
                       </div>
                     )}
                   </div>

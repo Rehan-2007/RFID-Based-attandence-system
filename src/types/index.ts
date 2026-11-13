@@ -213,6 +213,9 @@ export interface MigrationInspection {
   backupCount: number;
   migrationCompletedAt?: number;
   legacyKeysSample: string[];
+  authenticatedUid?: string | null;
+  isAuthorizedAdmin?: boolean;
+  inspectionError?: string;
 }
 
 export interface MigrationRecordLog {
@@ -226,13 +229,18 @@ export interface MigrationRecordLog {
 export interface MigrationResult {
   success: boolean;
   message: string;
+  adminUid?: string;
   backupPath?: string;
+  backupVerifiedCount?: number;
+  backupExpectedCount?: number;
   migratedCount: number;
   skippedDuplicateCount: number;
   unregisteredCount: number;
   verifiedCount: number;
   totalLegacyCount: number;
   legacyRemoved: boolean;
+  failedOperation?: string;
+  failedPath?: string;
   errors: string[];
   recordLogs?: MigrationRecordLog[];
 }

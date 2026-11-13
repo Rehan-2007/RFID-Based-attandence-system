@@ -132,7 +132,12 @@ interface AttendanceContextType {
   toggleHolidayDate: (date: string, isHoliday: boolean, label?: string) => Promise<void>;
   refreshMigrationInspection: () => Promise<MigrationInspection | null>;
   executeDatabaseMigration: () => Promise<MigrationResult>;
-  downloadDatabaseBackup: () => Promise<{ backupPath: string; filename: string }>;
+  downloadDatabaseBackup: () => Promise<{
+    backupPath: string;
+    filename: string;
+    verifiedRecordCount: number;
+    expectedRecordCount: number;
+  }>;
   assignRecoveredRecords: (
     unregisteredUid: string,
     targetStudentUid: string
@@ -945,7 +950,12 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
     await refreshMigrationInspection();
-    return { backupPath: backup.backupPath, filename: backup.filename };
+    return {
+      backupPath: backup.backupPath,
+      filename: backup.filename,
+      verifiedRecordCount: backup.verifiedRecordCount,
+      expectedRecordCount: backup.expectedRecordCount,
+    };
   }, [user, refreshMigrationInspection]);
 
   const assignRecoveredRecords = useCallback(

@@ -566,10 +566,10 @@ export async function syncWorkingDaysFromDates(dates: string[]): Promise<void> {
     const existing = (wdSnap && wdSnap.exists && wdSnap.exists() ? wdSnap.val() : {}) as Record<string, WorkingDayConfig>;
     const today = getISTDateStr();
 
-    const updates: Record<string, any> = {};
+    const workingDayUpdates: Record<string, any> = {};
     dates.forEach((d) => {
       if (d && isValidDateStr(d) && d <= today && !existing[d]) {
-        updates[`working_days/${d}`] = {
+        workingDayUpdates[d] = {
           date: d,
           isHoliday: false,
           label: 'Institutional Working Day',
@@ -578,8 +578,8 @@ export async function syncWorkingDaysFromDates(dates: string[]): Promise<void> {
       }
     });
 
-    if (Object.keys(updates).length > 0) {
-      await update(ref(db), stripUndefinedDeep(updates));
+    if (Object.keys(workingDayUpdates).length > 0) {
+      await update(ref(db, 'working_days'), stripUndefinedDeep(workingDayUpdates));
     }
   } catch {
     // Non-blocking sync
@@ -1159,6 +1159,100 @@ export function withTimeout<T>(promise: Promise<T>, timeoutMs: number, fallbackV
   return Promise.race([promise, timeoutPromise]).finally(() => {
     if (timer) clearTimeout(timer);
   });
+}
+
+export function withTimeoutReject<T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
+  let timer: any;
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(timeoutMessage));
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+export class RtdbOperationError extends Error {
+  operation: string;
+  path: string;
+  code: string;
+
+  constructor(operation: string, path: string, code: string, originalMessage: string) {
+    super(`[${code}] ${operation} failed at path "${path}": ${originalMessage}`);
+    this.name = 'RtdbOperationError';
+    this.operation = operation;
+    this.path = path;
+    this.code = code;
+  }
+}
+
+async function runRtdbOp<T>(operation: string, path: string, fn: () => Promise<T>): Promise<T> {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  try {
+    return await fn();
+  } catch (err: any) {
+    if (err instanceof RtdbOperationError) throw err;
+    const rawMsg = err?.message || String(err || 'Unknown Firebase error');
+    const code =
+      err?.code ||
+      (/permission_denied|permission denied/i.test(rawMsg) ? 'PERMISSION_DENIED' : 'FIREBASE_ERROR');
+    throw new RtdbOperationError(operation, normalizedPath, code, rawMsg);
+  }
+}
+
+/**
+ * Verifies live Firebase Authentication session, administrator UID match, and active ID token.
+ */
+export async function verifyAdministratorAuth(): Promise<{
+  uid: string;
+  email: string | null;
+  tokenVerified: boolean;
+}> {
+  const auth = getFirebaseAuth();
+  const fbUser = auth.currentUser;
+
+  if (!fbUser) {
+    throw new RtdbOperationError(
+      'AUTH_CHECK',
+      '/auth/currentUser',
+      'UNAUTHENTICATED',
+      'No authenticated Firebase user session found. Please sign in as Administrator.'
+    );
+  }
+
+  if (fbUser.uid !== CONFIGURED_ADMIN_UID) {
+    throw new RtdbOperationError(
+      'AUTH_UID_CHECK',
+      '/auth/currentUser',
+      'UNAUTHORIZED_UID',
+      `Authenticated UID "${fbUser.uid}" does not match authorized administrator UID "${CONFIGURED_ADMIN_UID}".`
+    );
+  }
+
+  let tokenVerified = false;
+  try {
+    const freshToken = await withTimeoutReject(fbUser.getIdToken(true), 5000, 'ID token refresh timed out');
+    tokenVerified = Boolean(freshToken);
+  } catch {
+    const cachedToken = await withTimeout(fbUser.getIdToken(false), 3000, '');
+    tokenVerified = Boolean(cachedToken);
+  }
+
+  if (!tokenVerified) {
+    throw new RtdbOperationError(
+      'AUTH_TOKEN_REFRESH',
+      '/auth/token',
+      'AUTH_TOKEN_INVALID',
+      'Unable to obtain a valid Firebase Authentication ID token.'
+    );
+  }
+
+  return {
+    uid: fbUser.uid,
+    email: fbUser.email,
+    tokenVerified,
+  };
 }
 
 /**
@@ -2949,11 +3043,52 @@ function mergeAttendanceEntries(existing: any, incoming: any): any {
   };
 }
 
+function countLegacyAttendanceRecords(
+  legacyAtt: Record<string, any> | null | undefined,
+  legacyStuAtt?: Record<string, any> | null | undefined
+): number {
+  const seenPairs = new Set<string>();
+  let count = 0;
+
+  if (legacyAtt && typeof legacyAtt === 'object') {
+    Object.entries(legacyAtt).forEach(([dateKey, dayMap]) => {
+      if (!dayMap || typeof dayMap !== 'object') return;
+      Object.entries(dayMap).forEach(([uidKey, rawRec]) => {
+        if (!rawRec || typeof rawRec !== 'object') return;
+        const normUid = normalizeRfidKey((rawRec as any).rfidUID || (rawRec as any).uid || uidKey);
+        seenPairs.add(`${dateKey}::${normUid}`);
+        count++;
+      });
+    });
+  }
+
+  if (legacyStuAtt && typeof legacyStuAtt === 'object') {
+    Object.entries(legacyStuAtt).forEach(([uidKey, datesMap]) => {
+      if (!datesMap || typeof datesMap !== 'object') return;
+      Object.entries(datesMap).forEach(([dateKey, rawRec]) => {
+        if (!rawRec || typeof rawRec !== 'object') return;
+        const normUid = normalizeRfidKey((rawRec as any).rfidUID || (rawRec as any).uid || uidKey);
+        const pair = `${dateKey}::${normUid}`;
+        if (!seenPairs.has(pair)) {
+          seenPairs.add(pair);
+          count++;
+        }
+      });
+    });
+  }
+
+  return count;
+}
+
 /**
  * Safely inspect current Firebase Realtime Database state without modifying any data.
  */
 export async function inspectLegacyDatabase(): Promise<MigrationInspection> {
   const db = getFirebaseDatabase();
+  const auth = getFirebaseAuth();
+  const currentUser = auth.currentUser;
+  const authenticatedUid = currentUser?.uid || null;
+  const isAuthorizedAdmin = authenticatedUid === CONFIGURED_ADMIN_UID;
 
   let studentsVal: Record<string, any> = {};
   let legacyAttVal: Record<string, Record<string, any>> = {};
@@ -2961,16 +3096,25 @@ export async function inspectLegacyDatabase(): Promise<MigrationInspection> {
   let recoveryVal: Record<string, Record<string, any>> = {};
   let backupCount = 0;
   let migrationCompletedAt: number | undefined = undefined;
+  const inspectionErrors: string[] = [];
 
   try {
-    const sSnap = await withTimeout(get(ref(db, 'students')), 3000, null);
-    if (sSnap && sSnap.exists && sSnap.exists()) studentsVal = sSnap.val() || {};
-  } catch {}
+    const sSnap = await runRtdbOp('GET', '/students', () =>
+      withTimeoutReject(get(ref(db, 'students')), 5000, 'Timed out reading /students')
+    );
+    if (sSnap.exists()) studentsVal = sSnap.val() || {};
+  } catch (err: any) {
+    inspectionErrors.push(err?.message || 'Failed reading /students');
+  }
 
   try {
-    const aSnap = await withTimeout(get(ref(db, 'attendance')), 3000, null);
-    if (aSnap && aSnap.exists && aSnap.exists()) legacyAttVal = aSnap.val() || {};
-  } catch {}
+    const aSnap = await runRtdbOp('GET', '/attendance', () =>
+      withTimeoutReject(get(ref(db, 'attendance')), 5000, 'Timed out reading /attendance')
+    );
+    if (aSnap.exists()) legacyAttVal = aSnap.val() || {};
+  } catch (err: any) {
+    inspectionErrors.push(err?.message || 'Failed reading /attendance');
+  }
 
   try {
     const saSnap = await withTimeout(get(ref(db, 'students_attendance')), 2500, null);
@@ -2983,20 +3127,37 @@ export async function inspectLegacyDatabase(): Promise<MigrationInspection> {
   } catch {}
 
   try {
-    const bSnap = await withTimeout(get(ref(db, 'database_backups')), 2000, null);
-    if (bSnap && bSnap.exists && bSnap.exists()) backupCount = Object.keys(bSnap.val() || {}).length;
-  } catch {}
-
-  try {
-    const mSnap = await withTimeout(get(ref(db, 'migration_status/unified_students_v1')), 2000, null);
-    if (mSnap && mSnap.exists && mSnap.exists()) {
-      migrationCompletedAt = mSnap.val()?.completedAt;
+    const bSnap = await runRtdbOp('GET', '/backups', () =>
+      withTimeoutReject(get(ref(db, 'backups')), 4000, 'Timed out reading /backups')
+    );
+    if (bSnap.exists()) {
+      const backupsObj = bSnap.val() || {};
+      const keys = Object.keys(backupsObj);
+      backupCount = keys.length;
+      keys.forEach((k) => {
+        const verifiedAt = backupsObj[k]?.migrationVerification?.completedAt;
+        if (typeof verifiedAt === 'number' && (!migrationCompletedAt || verifiedAt > migrationCompletedAt)) {
+          migrationCompletedAt = verifiedAt;
+        }
+      });
     }
-  } catch {}
+  } catch (err: any) {
+    inspectionErrors.push(err?.message || 'Failed reading /backups');
+  }
+
+  if (!migrationCompletedAt) {
+    try {
+      const mSnap = await withTimeout(get(ref(db, 'migration_status/unified_students_v1')), 2000, null);
+      if (mSnap && mSnap.exists && mSnap.exists()) {
+        migrationCompletedAt = mSnap.val()?.completedAt;
+      }
+    } catch {}
+  }
 
   const normalizedStudents: Record<string, Student> = {};
   let alreadyUnifiedCount = 0;
   Object.entries(studentsVal).forEach(([k, st]) => {
+    if (!st || typeof st !== 'object') return;
     const normKey = normalizeRfidKey(st?.uid || k);
     normalizedStudents[normKey] = st;
     if (st?.attendance && typeof st.attendance === 'object') {
@@ -3005,32 +3166,7 @@ export async function inspectLegacyDatabase(): Promise<MigrationInspection> {
   });
 
   const legacyDates = Object.keys(legacyAttVal);
-  let legacyRecordCount = 0;
-  const seenPairs = new Set<string>();
-
-  legacyDates.forEach((dateKey) => {
-    const dayMap = legacyAttVal[dateKey];
-    if (dayMap && typeof dayMap === 'object') {
-      Object.keys(dayMap).forEach((uidKey) => {
-        const normUid = normalizeRfidKey(dayMap[uidKey]?.rfidUID || dayMap[uidKey]?.uid || uidKey);
-        seenPairs.add(`${dateKey}::${normUid}`);
-        legacyRecordCount++;
-      });
-    }
-  });
-
-  Object.entries(legacyStuAttVal).forEach(([uidKey, datesMap]) => {
-    const normUid = normalizeRfidKey(uidKey);
-    if (datesMap && typeof datesMap === 'object') {
-      Object.keys(datesMap).forEach((dateKey) => {
-        const pair = `${dateKey}::${normUid}`;
-        if (!seenPairs.has(pair)) {
-          seenPairs.add(pair);
-          legacyRecordCount++;
-        }
-      });
-    }
-  });
+  const legacyRecordCount = countLegacyAttendanceRecords(legacyAttVal, legacyStuAttVal);
 
   const unregisteredGroups: UnregisteredAttendanceGroup[] = [];
   let unregisteredCount = 0;
@@ -3068,37 +3204,65 @@ export async function inspectLegacyDatabase(): Promise<MigrationInspection> {
     backupCount,
     migrationCompletedAt,
     legacyKeysSample: legacyDates.slice(0, 6),
+    authenticatedUid,
+    isAuthorizedAdmin,
+    inspectionError: inspectionErrors.length > 0 ? inspectionErrors.join(' | ') : undefined,
   };
 }
 
 /**
- * Create a complete backup of all RTDB nodes before migration and return downloadable JSON + RTDB path.
+ * Create a verified backup under /backups/{backupKey} before migration and return downloadable JSON + RTDB path.
  */
 export async function exportCompleteDatabaseBackup(
   adminUser?: { email?: string | null; uid?: string }
-): Promise<{ backupPath: string; jsonString: string; filename: string }> {
+): Promise<{
+  backupPath: string;
+  rawBackupPath: string;
+  backupKey: string;
+  jsonString: string;
+  filename: string;
+  verifiedRecordCount: number;
+  expectedRecordCount: number;
+  adminUid: string;
+}> {
+  const verifiedAdmin = await verifyAdministratorAuth();
   const db = getFirebaseDatabase();
   const ts = Date.now();
   const dateStamp = `${getISTDateStr(ts)}_${getISTTimeStr(ts).replace(/:/g, '-')}`;
 
+  const studentsVal = await runRtdbOp('GET', '/students', async () => {
+    const s = await withTimeoutReject(get(ref(db, 'students')), 6000, 'Timed out reading /students');
+    return s.exists() ? s.val() : null;
+  });
+
+  const attendanceVal = await runRtdbOp('GET', '/attendance', async () => {
+    const s = await withTimeoutReject(get(ref(db, 'attendance')), 6000, 'Timed out reading /attendance');
+    return s.exists() ? s.val() : null;
+  });
+
   const safeGet = async (path: string) => {
     try {
-      const s = await withTimeout(get(ref(db, path)), 3500, null);
+      const s = await withTimeout(get(ref(db, path)), 2500, null);
       return s && s.exists && s.exists() ? s.val() : null;
     } catch {
       return null;
     }
   };
 
+  const studentsAttendanceVal = await safeGet('students_attendance');
+  const expectedRecordCount = countLegacyAttendanceRecords(attendanceVal, studentsAttendanceVal);
+
   const backupPayload = stripUndefinedDeep({
     createdAt: ts,
     createdAtIst: getISTTimestampDisplay(ts),
-    createdBy: adminUser?.email || 'admin',
+    createdBy: verifiedAdmin.email || adminUser?.email || 'admin',
+    createdByUid: verifiedAdmin.uid,
     schemaVersion: 'pre_unified_students_v1',
+    legacyAttendanceRecordCount: expectedRecordCount,
     nodes: {
-      students: await safeGet('students'),
-      attendance: await safeGet('attendance'),
-      students_attendance: await safeGet('students_attendance'),
+      students: studentsVal,
+      attendance: attendanceVal,
+      students_attendance: studentsAttendanceVal,
       working_days: await safeGet('working_days'),
       settings: await safeGet('settings'),
       suspensions: await safeGet('suspensions'),
@@ -3111,28 +3275,62 @@ export async function exportCompleteDatabaseBackup(
   });
 
   const backupKey = `pre_migration_${ts}`;
-  let backupPath = `database_backups/${backupKey}`;
+  const rawBackupPath = `backups/${backupKey}`;
+  const backupPath = `/${rawBackupPath}`;
 
-  try {
-    await set(ref(db, backupPath), backupPayload);
-  } catch {
-    backupPath = `auditLogs/backups/${backupKey}`;
-    await set(ref(db, backupPath), backupPayload);
+  await runRtdbOp('SET', backupPath, () =>
+    withTimeoutReject(set(ref(db, rawBackupPath), backupPayload), 8000, `Timed out writing backup to ${backupPath}`)
+  );
+
+  // Verify the backup read-back contains every legacy attendance record
+  const verifySnap = await runRtdbOp('GET (Verify Backup)', backupPath, () =>
+    withTimeoutReject(get(ref(db, rawBackupPath)), 6000, `Timed out verifying backup at ${backupPath}`)
+  );
+
+  if (!verifySnap.exists()) {
+    throw new RtdbOperationError(
+      'VERIFY_BACKUP',
+      backupPath,
+      'BACKUP_MISSING',
+      `Backup snapshot does not exist at ${backupPath} after write.`
+    );
+  }
+
+  const verifiedVal = verifySnap.val();
+  const verifiedRecordCount = countLegacyAttendanceRecords(
+    verifiedVal?.nodes?.attendance,
+    verifiedVal?.nodes?.students_attendance
+  );
+
+  if (verifiedRecordCount !== expectedRecordCount) {
+    throw new RtdbOperationError(
+      'VERIFY_BACKUP',
+      backupPath,
+      'BACKUP_COUNT_MISMATCH',
+      `Backup at ${backupPath} recorded ${verifiedRecordCount}/${expectedRecordCount} legacy attendance records.`
+    );
   }
 
   return {
     backupPath,
+    rawBackupPath,
+    backupKey,
     jsonString: JSON.stringify(backupPayload, null, 2),
     filename: `rfid_attendance_backup_${dateStamp}.json`,
+    verifiedRecordCount,
+    expectedRecordCount,
+    adminUid: verifiedAdmin.uid,
   };
 }
 
 /**
- * Safely migrate legacy /attendance & /students_attendance into unified students/{RFID_UID}/attendance/{DATE}.
- * - Idempotent: never duplicates records or overwrites student personal info.
- * - Preserves unregistered card scans under migration_recovery/unregistered_attendance/{UID}/{DATE}.
- * - Preserves original timestamps, UIDs, dates, and times.
- * - Verifies 100% parity before removing legacy /attendance nodes.
+ * Safely migrate legacy /attendance & /students_attendance into unified /students/{RFID_UID}/attendance/{DATE}.
+ * 1. Verifies Firebase Auth & Administrator UID (bi3c890VUXhVE0JFxroYfnlQwea2).
+ * 2. Reads all legacy attendance records & creates verified backup under /backups.
+ * 3. Verifies backup contains all legacy records before touching /students.
+ * 4. Writes records strictly to /students/{UID}/attendance/{DATE} without unauthorized root writes.
+ * 5. Verifies every migrated record via read-back parity checks.
+ * 6. Preserves /attendance until 100% verification passes.
  */
 export async function runUnifiedDatabaseMigration(
   adminUser: { email?: string | null; uid?: string }
@@ -3141,32 +3339,96 @@ export async function runUnifiedDatabaseMigration(
   const errors: string[] = [];
   const recordLogs: MigrationRecordLog[] = [];
 
-  // 1. Mandatory pre-migration backup
-  let backupPath = '';
+  // 1. Verify Firebase Authentication and Administrator UID match
+  let verifiedAdmin: { uid: string; email: string | null; tokenVerified: boolean };
   try {
-    const backup = await exportCompleteDatabaseBackup(adminUser);
-    backupPath = backup.backupPath;
-  } catch (err: any) {
+    verifiedAdmin = await verifyAdministratorAuth();
+  } catch (authErr: any) {
+    const opErr = authErr instanceof RtdbOperationError ? authErr : null;
+    const msg = authErr?.message || 'Administrator authentication verification failed.';
     return {
       success: false,
-      message: `Migration aborted: Pre-migration backup failed (${err?.message || 'Permission error'}).`,
+      message: `Migration aborted: ${msg}`,
       migratedCount: 0,
       skippedDuplicateCount: 0,
       unregisteredCount: 0,
       verifiedCount: 0,
       totalLegacyCount: 0,
       legacyRemoved: false,
-      errors: [err?.message || 'Backup write failed'],
+      failedOperation: opErr?.operation || 'AUTH_CHECK',
+      failedPath: opErr?.path || '/auth/currentUser',
+      errors: [msg],
       recordLogs,
     };
   }
 
-  // 2. Read /students with timeout protection and normalize any mixed-case RFID keys cleanly
-  const studentsSnap = await withTimeout(get(ref(db, 'students')), 6000, null);
-  const rawStudents: Record<string, any> =
-    studentsSnap && studentsSnap.exists && studentsSnap.exists() ? studentsSnap.val() : {};
+  // 2. Mandatory pre-migration backup under /backups + read-back verification
+  let backupPath = '';
+  let rawBackupPath = '';
+  let backupVerifiedCount = 0;
+  let backupExpectedCount = 0;
+  try {
+    const backup = await exportCompleteDatabaseBackup({
+      email: verifiedAdmin.email || adminUser?.email,
+      uid: verifiedAdmin.uid,
+    });
+    backupPath = backup.backupPath;
+    rawBackupPath = backup.rawBackupPath;
+    backupVerifiedCount = backup.verifiedRecordCount;
+    backupExpectedCount = backup.expectedRecordCount;
+  } catch (err: any) {
+    const opErr = err instanceof RtdbOperationError ? err : null;
+    const msg = err?.message || 'Backup write failed';
+    return {
+      success: false,
+      message: `Migration aborted: Pre-migration backup failed. Legacy /attendance was preserved.`,
+      adminUid: verifiedAdmin.uid,
+      migratedCount: 0,
+      skippedDuplicateCount: 0,
+      unregisteredCount: 0,
+      verifiedCount: 0,
+      totalLegacyCount: 0,
+      legacyRemoved: false,
+      failedOperation: opErr?.operation || 'BACKUP',
+      failedPath: opErr?.path || '/backups',
+      errors: [msg],
+      recordLogs,
+    };
+  }
+
+  // 3. Read /students explicitly (no silent null fallback)
+  let rawStudents: Record<string, any> = {};
+  try {
+    const studentsSnap = await runRtdbOp('GET', '/students', () =>
+      withTimeoutReject(get(ref(db, 'students')), 6000, 'Timed out reading /students')
+    );
+    rawStudents = studentsSnap.exists() ? studentsSnap.val() : {};
+  } catch (err: any) {
+    const opErr = err instanceof RtdbOperationError ? err : null;
+    const msg = err?.message || 'Failed reading /students';
+    return {
+      success: false,
+      message: `Migration aborted reading /students. Legacy /attendance was preserved.`,
+      adminUid: verifiedAdmin.uid,
+      backupPath,
+      backupVerifiedCount,
+      backupExpectedCount,
+      migratedCount: 0,
+      skippedDuplicateCount: 0,
+      unregisteredCount: 0,
+      verifiedCount: 0,
+      totalLegacyCount: 0,
+      legacyRemoved: false,
+      failedOperation: opErr?.operation || 'GET',
+      failedPath: opErr?.path || '/students',
+      errors: [msg],
+      recordLogs,
+    };
+  }
+
   const studentRegistry: Record<string, Student> = {};
   const lowercaseKeysToClean: string[] = [];
+  const affectedNormKeys = new Set<string>();
 
   for (const [rawKey, rawStu] of Object.entries(rawStudents)) {
     if (!rawStu || typeof rawStu !== 'object') continue;
@@ -3184,30 +3446,87 @@ export async function runUnifiedDatabaseMigration(
     });
     if (rawKey !== normKey) {
       lowercaseKeysToClean.push(rawKey);
+      affectedNormKeys.add(normKey);
     }
   }
 
-  // Write normalized uppercase student records first if any mixed-case keys existed
-  for (const normKey of Object.keys(studentRegistry)) {
-    if (!rawStudents[normKey] || lowercaseKeysToClean.length > 0) {
-      await set(ref(db, `students/${normKey}`), stripUndefinedDeep(studentRegistry[normKey]));
+  // Normalize only mixed-case student keys if any actually exist
+  try {
+    for (const normKey of affectedNormKeys) {
+      await runRtdbOp('SET', `/students/${normKey}`, () =>
+        set(ref(db, `students/${normKey}`), stripUndefinedDeep(studentRegistry[normKey]))
+      );
     }
-  }
-  for (const oldKey of lowercaseKeysToClean) {
-    try {
-      await remove(ref(db, `students/${oldKey}`));
-    } catch {}
+    for (const oldKey of lowercaseKeysToClean) {
+      await runRtdbOp('REMOVE', `/students/${oldKey}`, () =>
+        remove(ref(db, `students/${oldKey}`))
+      );
+    }
+  } catch (err: any) {
+    const opErr = err instanceof RtdbOperationError ? err : null;
+    const msg = err?.message || 'Failed normalizing student keys';
+    return {
+      success: false,
+      message: `Migration aborted while normalizing /students keys. Legacy /attendance was preserved.`,
+      adminUid: verifiedAdmin.uid,
+      backupPath,
+      backupVerifiedCount,
+      backupExpectedCount,
+      migratedCount: 0,
+      skippedDuplicateCount: 0,
+      unregisteredCount: 0,
+      verifiedCount: 0,
+      totalLegacyCount: 0,
+      legacyRemoved: false,
+      failedOperation: opErr?.operation || 'SET',
+      failedPath: opErr?.path || '/students',
+      errors: [msg],
+      recordLogs,
+    };
   }
 
-  // 3. Collect all legacy records from /attendance/{date}/{uid} and /students_attendance/{uid}/{date}
-  const attSnap = await withTimeout(get(ref(db, 'attendance')), 6000, null);
-  const hasRootAttendance = Boolean(attSnap && attSnap.exists && attSnap.exists());
-  const legacyAtt: Record<string, Record<string, any>> = hasRootAttendance ? attSnap!.val() : {};
+  // 4. Read all legacy records from /attendance (explicitly, no silent timeout suppression)
+  let hasRootAttendance = false;
+  let legacyAtt: Record<string, Record<string, any>> = {};
+  try {
+    const attSnap = await runRtdbOp('GET', '/attendance', () =>
+      withTimeoutReject(get(ref(db, 'attendance')), 6000, 'Timed out reading /attendance')
+    );
+    hasRootAttendance = attSnap.exists();
+    if (hasRootAttendance) {
+      legacyAtt = attSnap.val() || {};
+    }
+  } catch (err: any) {
+    const opErr = err instanceof RtdbOperationError ? err : null;
+    const msg = err?.message || 'Failed reading /attendance';
+    return {
+      success: false,
+      message: `Migration aborted reading /attendance. Legacy /attendance was preserved.`,
+      adminUid: verifiedAdmin.uid,
+      backupPath,
+      backupVerifiedCount,
+      backupExpectedCount,
+      migratedCount: 0,
+      skippedDuplicateCount: 0,
+      unregisteredCount: 0,
+      verifiedCount: 0,
+      totalLegacyCount: 0,
+      legacyRemoved: false,
+      failedOperation: opErr?.operation || 'GET',
+      failedPath: opErr?.path || '/attendance',
+      errors: [msg],
+      recordLogs,
+    };
+  }
 
+  let hasLegacyStudentsAttendance = false;
   let legacyStuAtt: Record<string, Record<string, any>> = {};
   try {
-    const saSnap = await withTimeout(get(ref(db, 'students_attendance')), 5000, null);
-    if (saSnap && saSnap.exists && saSnap.exists()) legacyStuAtt = saSnap.val();
+    const saSnap = await withTimeout(get(ref(db, 'students_attendance')), 3500, null);
+    if (saSnap && saSnap.exists && saSnap.exists()) {
+      hasLegacyStudentsAttendance = true;
+      legacyStuAtt = saSnap.val() || {};
+    }
   } catch {}
 
   const legacyPairs = new Map<string, { date: string; rawUid: string; normUid: string; rawRec: any }>();
@@ -3235,30 +3554,59 @@ export async function runUnifiedDatabaseMigration(
   });
 
   const totalLegacyCount = legacyPairs.size;
+  if (totalLegacyCount === 0) {
+    return {
+      success: true,
+      message: `No legacy records found in /attendance. Verified backup created at ${backupPath}.`,
+      adminUid: verifiedAdmin.uid,
+      backupPath,
+      backupVerifiedCount,
+      backupExpectedCount,
+      migratedCount: 0,
+      skippedDuplicateCount: 0,
+      unregisteredCount: 0,
+      verifiedCount: 0,
+      totalLegacyCount: 0,
+      legacyRemoved: !hasRootAttendance,
+      errors: [],
+      recordLogs,
+    };
+  }
+
   let migratedCount = 0;
   let skippedDuplicateCount = 0;
   let unregisteredCount = 0;
+  let firstFailedOperation: string | undefined;
+  let firstFailedPath: string | undefined;
 
-  const expectedTargets: Array<{ targetPath: string; date: string; uid: string }> = [];
-  const discoveredWorkingDates = new Set<string>();
+  const expectedTargets: Array<{ targetPath: string; date: string; uid: string; status: string }> = [];
 
-  // 4. Route each record either to students/{UID}/attendance/{DATE} or migration_recovery/unregistered_attendance/{UID}/{DATE}
+  // 5. Migrate each record strictly to /students/{UID}/attendance/{DATE}
   for (const entry of legacyPairs.values()) {
     const { date, normUid, rawRec } = entry;
-    if (isValidDateStr(date)) {
-      discoveredWorkingDates.add(date);
-    }
 
-    // Match directly or via studentId/authUid/email/name if card key matches registered student
     let targetStudent = studentRegistry[normUid];
     if (!targetStudent && rawRec.studentId) {
+      const targetStuId = rawRec.studentId.toString().trim().toUpperCase();
       targetStudent = Object.values(studentRegistry).find(
-        (s) => s.studentId?.trim().toUpperCase() === rawRec.studentId.toString().trim().toUpperCase()
+        (s) => s.studentId?.trim().toUpperCase() === targetStuId
       ) as Student;
     }
     if (!targetStudent && rawRec.authUid) {
       targetStudent = Object.values(studentRegistry).find(
         (s) => s.authUid === rawRec.authUid
+      ) as Student;
+    }
+    if (!targetStudent && rawRec.email) {
+      const targetEmail = rawRec.email.toString().trim().toLowerCase();
+      targetStudent = Object.values(studentRegistry).find(
+        (s) => s.email?.trim().toLowerCase() === targetEmail
+      ) as Student;
+    }
+    if (!targetStudent && (rawRec.studentName || rawRec.name)) {
+      const targetName = (rawRec.studentName || rawRec.name).toString().trim().toLowerCase();
+      targetStudent = Object.values(studentRegistry).find(
+        (s) => s.name?.trim().toLowerCase() === targetName
       ) as Student;
     }
     if (!targetStudent) {
@@ -3295,37 +3643,41 @@ export async function runUnifiedDatabaseMigration(
 
         const validationErr = validateAttendancePayload(normalizedRec);
         if (validationErr) {
-          errors.push(`${destPath}: ${validationErr}`);
-          recordLogs.push({ uid: targetUid, date, targetPath: destPath, action: 'failed', message: validationErr });
+          if (!firstFailedOperation) {
+            firstFailedOperation = 'VALIDATE_PAYLOAD';
+            firstFailedPath = `/${destPath}`;
+          }
+          errors.push(`/${destPath}: ${validationErr}`);
+          recordLogs.push({ uid: targetUid, date, targetPath: `/${destPath}`, action: 'failed', message: validationErr });
           continue;
         }
 
         if (existingAtTarget) {
           const merged = stripUndefinedDeep(mergeAttendanceEntries(existingAtTarget, normalizedRec));
-          await set(ref(db, destPath), merged);
+          await runRtdbOp('SET', `/${destPath}`, () => set(ref(db, destPath), merged));
           skippedDuplicateCount++;
           recordLogs.push({
             uid: targetUid,
             date,
-            targetPath: destPath,
+            targetPath: `/${destPath}`,
             action: 'merged',
             message: 'Duplicate avoided; merged with existing unified record',
           });
+          expectedTargets.push({ targetPath: destPath, date, uid: targetUid, status: merged.status });
         } else {
-          await set(ref(db, destPath), normalizedRec);
+          await runRtdbOp('SET', `/${destPath}`, () => set(ref(db, destPath), normalizedRec));
           migratedCount++;
           recordLogs.push({
             uid: targetUid,
             date,
-            targetPath: destPath,
+            targetPath: `/${destPath}`,
             action: 'migrated',
             message: `Preserved ${normalizedRec.time} (${normalizedRec.status})`,
           });
+          expectedTargets.push({ targetPath: destPath, date, uid: targetUid, status: normalizedRec.status });
         }
-
-        expectedTargets.push({ targetPath: destPath, date, uid: targetUid });
       } else {
-        // Unregistered RFID: preserve in recovery node without discarding!
+        // Unregistered RFID: preserve in recovery node without discarding
         const recPath = `migration_recovery/unregistered_attendance/${normUid}/${date}`;
         const normalizedUnreg = stripUndefinedDeep(
           normalizeAttendanceRecord(
@@ -3339,47 +3691,78 @@ export async function runUnifiedDatabaseMigration(
             normUid
           )
         );
-        await set(ref(db, recPath), normalizedUnreg);
+        await runRtdbOp('SET', `/${recPath}`, () => set(ref(db, recPath), normalizedUnreg));
         unregisteredCount++;
-        expectedTargets.push({ targetPath: recPath, date, uid: normUid });
+        expectedTargets.push({ targetPath: recPath, date, uid: normUid, status: normalizedUnreg.status });
         recordLogs.push({
           uid: normUid,
           date,
-          targetPath: recPath,
+          targetPath: `/${recPath}`,
           action: 'recovery',
           message: 'Unregistered RFID archived safely in recovery vault',
         });
       }
     } catch (recErr: any) {
+      const opErr = recErr instanceof RtdbOperationError ? recErr : null;
       const errMsg = recErr?.message || 'Write failed';
-      errors.push(`${normUid}/${date}: ${errMsg}`);
+      const failPath = opErr?.path || `/students/${normUid}/attendance/${date}`;
+      if (!firstFailedOperation) {
+        firstFailedOperation = opErr?.operation || 'SET';
+        firstFailedPath = failPath;
+      }
+      errors.push(errMsg);
       recordLogs.push({
         uid: normUid,
         date,
-        targetPath: `students/${normUid}/attendance/${date}`,
+        targetPath: failPath,
         action: 'failed',
         message: errMsg,
       });
     }
   }
 
-  // Sync discovered dates into working_days (preserving any existing holidays)
-  if (discoveredWorkingDates.size > 0) {
-    await syncWorkingDaysFromDates(Array.from(discoveredWorkingDates));
-  }
-
-  // 5. 100% Parity Verification
+  // 6. Verify EVERY migrated record via read-back parity check
   let verifiedCount = 0;
   for (const target of expectedTargets) {
     try {
-      const checkSnap = await withTimeout(get(ref(db, target.targetPath)), 4000, null);
-      if (checkSnap && checkSnap.exists && checkSnap.exists()) {
-        verifiedCount++;
+      const checkSnap = await runRtdbOp('GET (Verify Migrated)', `/${target.targetPath}`, () =>
+        withTimeoutReject(
+          get(ref(db, target.targetPath)),
+          5000,
+          `Verification read timed out at /${target.targetPath}`
+        )
+      );
+      if (checkSnap.exists()) {
+        const val = checkSnap.val() || {};
+        const storedUid = normalizeRfidKey(val.uid || val.rfidUID || '');
+        const hasValidFields =
+          val.date === target.date &&
+          storedUid === target.uid &&
+          Boolean(val.status) &&
+          Boolean(val.time);
+        if (hasValidFields) {
+          verifiedCount++;
+        } else {
+          if (!firstFailedOperation) {
+            firstFailedOperation = 'VERIFY_PARITY';
+            firstFailedPath = `/${target.targetPath}`;
+          }
+          errors.push(`Parity mismatch at /${target.targetPath} (stored uid=${storedUid}, date=${val.date || 'missing'})`);
+        }
       } else {
-        errors.push(`Missing verified record at ${target.targetPath}`);
+        if (!firstFailedOperation) {
+          firstFailedOperation = 'VERIFY_EXISTS';
+          firstFailedPath = `/${target.targetPath}`;
+        }
+        errors.push(`Missing verified record at /${target.targetPath}`);
       }
     } catch (verifyErr: any) {
-      errors.push(`Verification error at ${target.targetPath}: ${verifyErr?.message}`);
+      const opErr = verifyErr instanceof RtdbOperationError ? verifyErr : null;
+      if (!firstFailedOperation) {
+        firstFailedOperation = opErr?.operation || 'GET (Verify Migrated)';
+        firstFailedPath = opErr?.path || `/${target.targetPath}`;
+      }
+      errors.push(verifyErr?.message || `Verification error at /${target.targetPath}`);
     }
   }
 
@@ -3389,57 +3772,79 @@ export async function runUnifiedDatabaseMigration(
     errors.length === 0;
   let legacyRemoved = false;
 
-  // 6. Remove legacy /attendance and /students_attendance ONLY after 100% verification passes
+  // 7. Preserve legacy /attendance until 100% verification passes
   if (isVerified) {
     if (hasRootAttendance) {
       try {
-        await remove(ref(db, 'attendance'));
+        await runRtdbOp('REMOVE', '/attendance', () => remove(ref(db, 'attendance')));
         legacyRemoved = true;
       } catch (rmErr: any) {
-        errors.push(`Could not remove legacy /attendance: ${rmErr?.message}`);
+        const opErr = rmErr instanceof RtdbOperationError ? rmErr : null;
+        if (!firstFailedOperation) {
+          firstFailedOperation = opErr?.operation || 'REMOVE';
+          firstFailedPath = opErr?.path || '/attendance';
+        }
+        errors.push(rmErr?.message || 'Could not remove legacy /attendance');
+        legacyRemoved = false;
       }
     } else {
       legacyRemoved = true;
     }
 
-    try {
-      await remove(ref(db, 'students_attendance'));
-    } catch {}
+    if (hasLegacyStudentsAttendance) {
+      try {
+        await runRtdbOp('REMOVE', '/students_attendance', () => remove(ref(db, 'students_attendance')));
+      } catch {
+        // Non-blocking legacy auxiliary cleanup
+      }
+    }
 
-    try {
-      await set(ref(db, 'migration_status/unified_students_v1'), {
-        completedAt: Date.now(),
-        completedAtIst: getISTTimestampDisplay(),
-        completedBy: adminUser.email || 'admin',
-        backupPath,
-        migratedCount,
-        skippedDuplicateCount,
-        unregisteredCount,
-        verifiedCount,
-        totalLegacyCount,
-      });
-    } catch {}
-
-    await logAuditActivity('DATABASE_MIGRATION', adminUser, {
-      reason: 'Unified database restructuring: attendance merged into students/{RFID_UID}/attendance/{DATE}',
-      affectedCount: totalLegacyCount,
-      details: `Backup: ${backupPath} | Migrated: ${migratedCount} | Existing/Merged: ${skippedDuplicateCount} | Unregistered Recovered: ${unregisteredCount}`,
-      updatedValues: { backupPath, migratedCount, skippedDuplicateCount, unregisteredCount, verifiedCount },
-    });
+    // Record verification summary strictly inside the authorized /backups node
+    if (rawBackupPath) {
+      try {
+        await runRtdbOp('UPDATE', `${backupPath}/migrationVerification`, () =>
+          update(ref(db, rawBackupPath), {
+            migrationVerification: {
+              completedAt: Date.now(),
+              completedAtIst: getISTTimestampDisplay(),
+              completedBy: verifiedAdmin.email || 'admin',
+              completedByUid: verifiedAdmin.uid,
+              migratedCount,
+              skippedDuplicateCount,
+              unregisteredCount,
+              verifiedCount,
+              totalLegacyCount,
+              legacyRemoved,
+            },
+          })
+        );
+      } catch {
+        // Non-blocking metadata update on verified backup
+      }
+    }
   }
 
+  const overallSuccess = isVerified && legacyRemoved && errors.length === 0;
+
   return {
-    success: isVerified,
-    message: isVerified
-      ? `Migration verified (${verifiedCount}/${totalLegacyCount} records confirmed). Root /attendance safely backed up and removed.`
-      : `Verification incomplete (${verifiedCount}/${totalLegacyCount}). Legacy /attendance was NOT deleted.`,
+    success: overallSuccess,
+    message: overallSuccess
+      ? `Migration verified (${verifiedCount}/${totalLegacyCount} records confirmed). Backup verified at ${backupPath} and legacy /attendance removed.`
+      : isVerified && !legacyRemoved
+      ? `All ${verifiedCount}/${totalLegacyCount} records migrated & verified, but legacy /attendance cleanup failed. Legacy records remain preserved.`
+      : `Migration failed or verification incomplete (${verifiedCount}/${totalLegacyCount} verified). Legacy /attendance was preserved.`,
+    adminUid: verifiedAdmin.uid,
     backupPath,
+    backupVerifiedCount,
+    backupExpectedCount,
     migratedCount,
     skippedDuplicateCount,
     unregisteredCount,
     verifiedCount,
     totalLegacyCount,
     legacyRemoved,
+    failedOperation: overallSuccess ? undefined : firstFailedOperation,
+    failedPath: overallSuccess ? undefined : firstFailedPath,
     errors,
     recordLogs,
   };

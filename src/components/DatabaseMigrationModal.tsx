@@ -15,6 +15,8 @@ import {
   Layers,
 } from 'lucide-react';
 import { useAttendance } from '../context/AttendanceContext';
+import { useAuth } from '../context/AuthContext';
+import { CONFIGURED_ADMIN_UID } from '../services/firebase';
 import { MigrationResult } from '../types';
 
 interface DatabaseMigrationModalProps {
@@ -26,6 +28,7 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
   isOpen,
   onClose,
 }) => {
+  const { user } = useAuth();
   const {
     studentsList,
     migrationInspection,
@@ -68,7 +71,9 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
     setBackupMessage(null);
     try {
       const res = await downloadDatabaseBackup();
-      setBackupMessage(`Backup saved to RTDB (${res.backupPath}) and downloaded as ${res.filename}.`);
+      setBackupMessage(
+        `Verified backup saved to ${res.backupPath} (${res.verifiedRecordCount}/${res.expectedRecordCount} legacy records confirmed) and downloaded as ${res.filename}.`
+      );
     } catch (err: any) {
       setErrorMsg(err?.message || 'Backup failed.');
     } finally {
@@ -83,8 +88,18 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
     try {
       const res = await executeDatabaseMigration();
       setMigrationResult(res);
-      if (!res.success && res.errors.length > 0) {
-        setErrorMsg(res.errors.join(' | '));
+      if (!res.success) {
+        if (res.failedOperation || res.failedPath) {
+          setErrorMsg(
+            `Operation "${res.failedOperation || 'MIGRATION'}" failed at path "${res.failedPath || 'unknown'}": ${
+              res.errors.join(' | ') || res.message
+            }`
+          );
+        } else if (res.errors.length > 0) {
+          setErrorMsg(res.errors.join(' | '));
+        } else {
+          setErrorMsg(res.message);
+        }
       }
     } catch (err: any) {
       setErrorMsg(err?.message || 'Migration execution failed.');
@@ -188,11 +203,25 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
 
           {/* Live Inspection Metrics */}
           <div className="space-y-2.5">
-            <div className="flex items-center justify-between">
-              <h4 className="font-bold text-slate-200 flex items-center gap-2">
-                <Database className="w-4 h-4 text-blue-400" />
-                <span>Live Database Inspection</span>
-              </h4>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <h4 className="font-bold text-slate-200 flex items-center gap-2">
+                  <Database className="w-4 h-4 text-blue-400" />
+                  <span>Live Database Inspection</span>
+                </h4>
+                <span
+                  className={`px-2 py-0.5 rounded-full text-[10px] font-mono border ${
+                    (migrationInspection?.authenticatedUid ?? user?.uid) === CONFIGURED_ADMIN_UID
+                      ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
+                      : 'bg-rose-500/10 text-rose-300 border-rose-500/30'
+                  }`}
+                >
+                  Auth UID: {migrationInspection?.authenticatedUid ?? user?.uid ?? 'Not Signed In'}
+                  {(migrationInspection?.authenticatedUid ?? user?.uid) === CONFIGURED_ADMIN_UID
+                    ? ' (Admin Verified)'
+                    : ' (Mismatch)'}
+                </span>
+              </div>
               <button
                 onClick={handleRefresh}
                 disabled={isInspecting || isMigrating}
@@ -263,10 +292,20 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
           </div>
 
           {/* Alerts */}
-          {errorMsg && (
+          {(errorMsg || migrationInspection?.inspectionError) && (
             <div className="p-3.5 rounded-xl bg-rose-950/50 border border-rose-500/50 text-rose-200 flex items-start gap-2.5">
               <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-              <span className="leading-relaxed">{errorMsg}</span>
+              <div className="space-y-1 min-w-0">
+                <p className="font-mono text-[11px] break-all leading-relaxed">
+                  {errorMsg || migrationInspection?.inspectionError}
+                </p>
+                {migrationResult && !migrationResult.success && (migrationResult.failedOperation || migrationResult.failedPath) && (
+                  <p className="text-[10px] font-mono text-rose-300/90">
+                    Failed Operation: <strong>{migrationResult.failedOperation || 'N/A'}</strong> • Failed Path:{' '}
+                    <strong>{migrationResult.failedPath || 'N/A'}</strong>
+                  </p>
+                )}
+              </div>
             </div>
           )}
 
@@ -282,7 +321,7 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
               className={`p-4 rounded-2xl border space-y-3 ${
                 migrationResult.success
                   ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-200'
-                  : 'bg-amber-950/30 border-amber-500/40 text-amber-200'
+                  : 'bg-rose-950/30 border-rose-500/40 text-rose-200'
               }`}
             >
               <div className="flex items-center justify-between gap-2 font-bold">
@@ -290,14 +329,29 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
                   {migrationResult.success ? (
                     <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
                   ) : (
-                    <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                    <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
                   )}
                   <span>{migrationResult.message}</span>
                 </div>
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-black/30">
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-black/30 shrink-0">
                   {migrationResult.legacyRemoved ? 'Legacy /attendance Cleaned' : 'Legacy Preserved'}
                 </span>
               </div>
+
+              {migrationResult.backupPath && (
+                <div className="px-2.5 py-1.5 rounded-lg bg-black/30 border border-white/10 text-[11px] font-mono flex flex-wrap items-center justify-between gap-2">
+                  <span>
+                    Backup Path: <strong className="text-cyan-300">{migrationResult.backupPath}</strong>
+                  </span>
+                  <span>
+                    Backup Verified:{' '}
+                    <strong>
+                      {migrationResult.backupVerifiedCount ?? 0}/{migrationResult.backupExpectedCount ?? 0}
+                    </strong>{' '}
+                    records
+                  </span>
+                </div>
+              )}
 
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] font-mono pt-1">
                 <div className="p-2 rounded bg-black/30">
@@ -497,7 +551,7 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
         {/* Footer */}
         <div className="p-4 border-t border-slate-800 bg-slate-900/50 flex items-center justify-between">
           <span className="text-[11px] font-mono text-slate-500">
-            RTDB Backups stored: {migrationInspection?.backupCount ?? 0}
+            /backups Stored: {migrationInspection?.backupCount ?? 0}
           </span>
           <button
             onClick={onClose}

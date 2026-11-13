@@ -8,10 +8,30 @@ export type AuthStatus =
   | 'unauthenticated'
   | 'error';
 
+export type DbDiagnosticCode =
+  | 'connected'
+  | 'connecting'
+  | 'disconnected'
+  | 'auth_expired'
+  | 'permission_denied'
+  | 'not_registered'
+  | 'mapping_missing'
+  | 'empty_records';
+
+export interface DbDiagnosticState {
+  code: DbDiagnosticCode;
+  label: string;
+  message: string;
+  path?: string;
+  operation?: string;
+}
+
 export interface Student {
-  uid: string; // RFID UID (e.g., '5AA5AB24')
+  uid: string; // Hardware RFID Card UID (e.g., 'A1B2C3D4')
+  studentDbId?: string; // Stable key under /students/{studentDbId}
+  rfidUID?: string; // Normalized hardware RFID Card UID
   name: string;
-  studentId: string; // Roll Number (e.g., 'STU-2024-001')
+  studentId: string; // Roll Number
   department: string;
   year: string;
   semester?: string;
@@ -28,6 +48,7 @@ export interface Student {
 
 export interface UserProfile {
   uid: string; // Firebase Auth UID
+  studentDbId?: string; // Stable key under /students/{studentDbId}
   name: string;
   email: string;
   rollNumber: string;
@@ -45,6 +66,7 @@ export interface AppUser {
   email: string | null;
   displayName: string;
   role: UserRole;
+  studentDbId?: string;
   rfidUID?: string;
   studentId?: string;
   rollNumber?: string;
@@ -71,6 +93,7 @@ export type AttendanceStatus = 'Present' | 'Absent' | 'Late' | 'Excused' | 'Dupl
 
 export interface StudentSuspension {
   id: string;
+  studentDbId?: string;
   studentRfid: string;
   studentName: string;
   studentId: string;
@@ -101,6 +124,8 @@ export interface AttendanceEditHistory {
 
 export interface AttendanceRecord {
   uid: string; // RFID UID
+  studentDbId?: string; // Key under /students/{studentDbId}
+  studentUID?: string;
   rfidUID?: string;
   studentRfid?: string;
   authUid?: string;
@@ -113,6 +138,7 @@ export interface AttendanceRecord {
   time: string; // HH:MM:SS
   timestamp: number;
   status: AttendanceStatus;
+  source?: string; // 'rfid_scanner' | 'admin_manual' | 'admin_edit' | 'admin_override' | 'migration'
   device?: string; // e.g., 'ESP32-RFID-01'
   notes?: string;
 
@@ -245,6 +271,13 @@ export interface MigrationResult {
   recordLogs?: MigrationRecordLog[];
 }
 
+export interface AutoMigrationStatus {
+  status: 'idle' | 'migrating' | 'success' | 'error';
+  message?: string;
+  result?: MigrationResult;
+  updatedAt?: number;
+}
+
 export interface AttendanceSettings {
   deadlineTime: string; // HH:mm in Asia/Kolkata, e.g. '10:30'
   updatedAt?: number;
@@ -313,3 +346,66 @@ export interface ResetAuditLog {
   description?: string;
 }
 
+export type DiagnosticSeverity = 'ok' | 'warning' | 'critical';
+
+export type DiagnosticCategory =
+  | 'permissions'
+  | 'missing_profiles'
+  | 'incorrect_roles'
+  | 'missing_mappings'
+  | 'ambiguous_mappings'
+  | 'invalid_rfid'
+  | 'incorrect_paths'
+  | 'missing_attendance';
+
+export interface DatabaseDiagnosticIssue {
+  id: string;
+  category: DiagnosticCategory;
+  severity: DiagnosticSeverity;
+  title: string;
+  description: string;
+  path?: string;
+  studentDbId?: string;
+  authUid?: string;
+  rfidUID?: string;
+  canAutoRepair?: boolean;
+  repairAction?: string;
+}
+
+export interface UnlinkedUserProfileEntry {
+  uid: string;
+  email?: string;
+  name?: string;
+  role?: string;
+  studentDbId?: string;
+  rfidUID?: string;
+  rollNumber?: string;
+}
+
+export interface DatabaseValidationReport {
+  checkedAt: number;
+  adminUid: string;
+  adminEmail?: string | null;
+  permissionChecks: Array<{
+    path: string;
+    operation: string;
+    allowed: boolean;
+    error?: string;
+  }>;
+  summary: {
+    totalStudents: number;
+    totalUserProfiles: number;
+    totalAuthMappings: number;
+    totalRfidMappings: number;
+    missingUserProfiles: number;
+    incorrectRoles: number;
+    missingMappings: number;
+    ambiguousMappings: number;
+    invalidRfids: number;
+    incorrectPaths: number;
+    missingAttendanceIssues: number;
+    permissionErrors: number;
+  };
+  issues: DatabaseDiagnosticIssue[];
+  unlinkedUserProfiles: UnlinkedUserProfileEntry[];
+}

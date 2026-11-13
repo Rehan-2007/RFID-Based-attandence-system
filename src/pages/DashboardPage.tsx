@@ -17,7 +17,9 @@ import {
   Wifi,
   WifiOff,
   RefreshCw,
-  Layers
+  Layers,
+  CheckCircle2,
+  X
 } from 'lucide-react';
 import { 
   ResponsiveContainer, 
@@ -89,6 +91,8 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate, onOpen
     dbErrorMessage,
     retryConnection,
     migrationInspection,
+    autoMigrationStatus,
+    dismissAutoMigrationStatus,
     unregisteredRecovery
   } = useAttendance();
 
@@ -228,8 +232,77 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate, onOpen
         </div>
       )}
 
+      {/* Live Automatic Database Migration Notifications */}
+      {autoMigrationStatus.status === 'migrating' && (
+        <div className="p-4 rounded-2xl bg-gradient-to-r from-cyan-950/60 via-slate-900 to-blue-950/50 border border-cyan-500/40 text-xs flex items-center gap-3 shadow-lg">
+          <RefreshCw className="w-4 h-4 text-cyan-400 animate-spin shrink-0" />
+          <div className="flex-1">
+            <p className="font-bold text-cyan-200">Automatic Database Migration in Progress</p>
+            <p className="text-[11px] text-slate-300 mt-0.5">{autoMigrationStatus.message}</p>
+          </div>
+        </div>
+      )}
+
+      {autoMigrationStatus.status === 'success' && (
+        <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-950/50 via-slate-900 to-cyan-950/30 border border-emerald-500/40 text-xs flex items-start justify-between gap-3 shadow-lg">
+          <div className="flex items-start gap-3">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-bold text-emerald-200">Automatic Migration Verified &amp; Completed</p>
+              <p className="text-[11px] text-slate-300 mt-0.5">{autoMigrationStatus.message}</p>
+              {autoMigrationStatus.result?.backupPath && (
+                <p className="text-[10px] font-mono text-emerald-300/80 mt-1">
+                  Backup: {autoMigrationStatus.result.backupPath} ({autoMigrationStatus.result.backupVerifiedCount}/{autoMigrationStatus.result.backupExpectedCount}) • Migrated: {autoMigrationStatus.result.migratedCount} • Verified: {autoMigrationStatus.result.verifiedCount}/{autoMigrationStatus.result.totalLegacyCount}
+                </p>
+              )}
+            </div>
+          </div>
+          <button
+            onClick={dismissAutoMigrationStatus}
+            className="p-1 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition cursor-pointer shrink-0"
+            title="Dismiss notification"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {autoMigrationStatus.status === 'error' && (
+        <div className="p-4 rounded-2xl bg-rose-950/50 border border-rose-500/40 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg">
+          <div className="flex items-start gap-3">
+            <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-bold text-rose-200">Automatic Migration Failed (Legacy /attendance Preserved)</p>
+              <p className="text-[11px] text-rose-200/90 mt-0.5">{autoMigrationStatus.message}</p>
+              {autoMigrationStatus.result && (autoMigrationStatus.result.failedOperation || autoMigrationStatus.result.failedPath) && (
+                <p className="text-[10px] font-mono text-rose-300 mt-1">
+                  Operation: <strong>{autoMigrationStatus.result.failedOperation || 'N/A'}</strong> • Path:{' '}
+                  <strong>{autoMigrationStatus.result.failedPath || 'N/A'}</strong>
+                </p>
+              )}
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => setIsMigrationOpen(true)}
+              className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold transition cursor-pointer flex items-center gap-1.5"
+            >
+              <Database className="w-3.5 h-3.5" />
+              <span>Inspect Details</span>
+            </button>
+            <button
+              onClick={dismissAutoMigrationStatus}
+              className="p-1 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition cursor-pointer"
+              title="Dismiss"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Legacy Database Migration / Recovery Notice Banner */}
-      {(migrationInspection?.hasLegacyAttendance || unregisteredRecovery.length > 0) && (
+      {(migrationInspection?.hasLegacyAttendance || unregisteredRecovery.length > 0) && autoMigrationStatus.status !== 'migrating' && (
         <div className="p-4 rounded-2xl bg-gradient-to-r from-amber-950/40 via-slate-900 to-cyan-950/30 border border-amber-500/40 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg">
           <div className="flex items-start gap-3">
             <div className="w-9 h-9 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">

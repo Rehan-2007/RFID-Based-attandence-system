@@ -138,11 +138,23 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
     migrationInspection?.hasLegacyAttendance || unregisteredRecovery.length > 0
   );
 
+  const findStudentForRecord = (rec: AttendanceRecord): Student | undefined => {
+    const dbKey = (rec.studentDbId || '').trim();
+    if (dbKey && students[dbKey]) return students[dbKey];
+    const uidUpper = (rec.rfidUID || rec.uid || '').trim().toUpperCase();
+    if (uidUpper && students[uidUpper]) return students[uidUpper];
+    return Object.values(students).find(
+      (s) =>
+        (dbKey && s.studentDbId === dbKey) ||
+        (uidUpper && (s.rfidUID || s.uid || '').trim().toUpperCase() === uidUpper)
+    );
+  };
+
   // Filtered list
   const filteredRecords = useMemo(() => {
     return recordsForDate.filter((rec) => {
       const q = searchQuery.toLowerCase().trim();
-      const student = students[rec.uid];
+      const student = findStudentForRecord(rec);
       const name = rec.studentName || student?.name || '';
       const dept = rec.department || student?.department || '';
       const semester = student?.semester || '';
@@ -163,18 +175,22 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
 
   // Stats for selected date (counting active students accurately)
   const activeUidSet = useMemo(() => {
-    return new Set(
-      Object.values(students)
-        .filter((s) => s.status === 'active' && !s.isSuspended)
-        .map((s) => s.uid.toUpperCase())
-    );
+    const set = new Set<string>();
+    Object.values(students)
+      .filter((s) => s.status === 'active' && !s.isSuspended)
+      .forEach((s) => {
+        if (s.studentDbId) set.add(s.studentDbId.trim());
+        const rfid = (s.rfidUID || s.uid || '').trim().toUpperCase();
+        if (rfid) set.add(rfid);
+      });
+    return set;
   }, [students]);
 
   const presentCountForDate = recordsForDate.filter(
-    (r) => r.status === 'Present' && activeUidSet.has(r.uid.toUpperCase())
+    (r) => r.status === 'Present' && ((r.studentDbId && activeUidSet.has(r.studentDbId.trim())) || activeUidSet.has(r.uid.toUpperCase()))
   ).length;
   const absentCountForDate = recordsForDate.filter(
-    (r) => r.status === 'Absent' && activeUidSet.has(r.uid.toUpperCase())
+    (r) => r.status === 'Absent' && ((r.studentDbId && activeUidSet.has(r.studentDbId.trim())) || activeUidSet.has(r.uid.toUpperCase()))
   ).length;
   const percentageForDate = totalStudentsCount > 0 
     ? Math.round((presentCountForDate / totalStudentsCount) * 100) 
@@ -228,12 +244,14 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
   };
 
   const handleOpenSuspension = (rec: AttendanceRecord) => {
-    const student = students[rec.uid] || {
+    const student = findStudentForRecord(rec) || {
+      studentDbId: rec.studentDbId,
       uid: rec.uid,
+      rfidUID: rec.rfidUID || rec.uid,
       name: rec.studentName || 'Student',
       studentId: rec.studentId || 'N/A',
       department: rec.department || 'General',
-      year: 'Final Year',
+      year: '1st Year',
       email: '',
       phone: '',
       registeredAt: new Date().toISOString(),
@@ -623,7 +641,7 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
                   filteredRecords.map((rec) => {
                     const rowKey = `${rec.date}_${rec.uid}`;
                     const isSelected = selectedKeys.has(rowKey);
-                    const student = students[rec.uid];
+                    const student = findStudentForRecord(rec);
                     const displayName = rec.studentName || student?.name || 'Unknown';
                     const dept = rec.department || student?.department || '—';
                     const isSuspended = Boolean(

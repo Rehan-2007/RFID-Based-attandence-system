@@ -21,7 +21,7 @@ export const StudentNavbar: React.FC<StudentNavbarProps> = ({
   onOpenSidebar,
 }) => {
   const { user, logout } = useAuth();
-  const { isDbConnected, dbErrorMessage } = useAttendance();
+  const { isDbConnected, dbErrorMessage, dbDiagnostic } = useAttendance();
   const [time, setTime] = useState<string>('');
 
   useEffect(() => {
@@ -83,7 +83,7 @@ export const StudentNavbar: React.FC<StudentNavbarProps> = ({
         {/* Live RTDB Connection Indicator */}
         <div
           className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-[11px] font-mono"
-          title={dbErrorMessage || 'Firebase Realtime Database Connection'}
+          title={dbDiagnostic?.message || dbErrorMessage || 'Firebase Realtime Database Connection'}
         >
           <span
             className={`w-2 h-2 rounded-full ${
@@ -103,7 +103,7 @@ export const StudentNavbar: React.FC<StudentNavbarProps> = ({
                   : 'text-amber-400'
             }
           >
-            {dbErrorMessage ? 'OFFLINE' : isDbConnected ? 'SYNCED' : 'SYNCING'}
+            {dbErrorMessage ? dbDiagnostic.label : isDbConnected ? 'SYNCED' : 'SYNCING'}
           </span>
         </div>
 

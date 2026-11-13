@@ -104,7 +104,7 @@ void loop() {
     return;
   }
 
-  // Format Card UID as Hex string (e.g. 0A37B224)
+  // Format Card UID as Hex string (e.g. A1B2C3D4)
   String cardUID = "";
   for (byte i = 0; i < rfid.uid.size; i++) {
     if (rfid.uid.uidByte[i] < 0x10) cardUID += "0";
@@ -122,10 +122,20 @@ void loop() {
   strftime(timeStr, sizeof(timeStr), "%H:%M:%S", &timeinfo);
 
   // -------------------------------------------------------------
-  // STEP 1: VERIFY REGISTERED ACTIVE STUDENT & SUSPENSION STATUS
-  // Check /students/{CARD_UID}/status & /students/{CARD_UID}/isSuspended
+  // STEP 0: RESOLVE RFID CARD UID -> STUDENT DATABASE ID
+  // Reads /rfid_to_student/{CARD_UID}/studentDbId (falls back to cardUID)
   // -------------------------------------------------------------
-  String statusPath = "/students/" + cardUID + "/status";
+  String studentDbId = cardUID;
+  String mappingPath = "/rfid_to_student/" + cardUID + "/studentDbId";
+  if (Firebase.RTDB.getString(&fbdo, mappingPath) && fbdo.stringData().length() > 0) {
+    studentDbId = fbdo.stringData();
+  }
+
+  // -------------------------------------------------------------
+  // STEP 1: VERIFY REGISTERED ACTIVE STUDENT & SUSPENSION STATUS
+  // Check /students/{STUDENT_DB_ID}/status & /students/{STUDENT_DB_ID}/isSuspended
+  // -------------------------------------------------------------
+  String statusPath = "/students/" + studentDbId + "/status";
   if (!Firebase.RTDB.getString(&fbdo, statusPath) || fbdo.stringData() != "active") {
     Serial.println("ACCESS DENIED: Unregistered, inactive, or suspended student.");
     beepDenied();
@@ -133,7 +143,7 @@ void loop() {
     return;
   }
 
-  String suspPath = "/students/" + cardUID + "/isSuspended";
+  String suspPath = "/students/" + studentDbId + "/isSuspended";
   if (Firebase.RTDB.getBool(&fbdo, suspPath) && fbdo.boolData() == true) {
     Serial.println("ACCESS DENIED: Student is SUSPENDED. Attendance rejected.");
     beepDenied();
@@ -144,9 +154,9 @@ void loop() {
   // -------------------------------------------------------------
   // STEP 2: CHECK ADMINISTRATIVE OVERRIDE LOCK
   // Check if admin manually marked Absent for today:
-  // /students/{CARD_UID}/attendance/{DATE}/isOverridden
+  // /students/{STUDENT_DB_ID}/attendance/{DATE}/isOverridden
   // -------------------------------------------------------------
-  String overridePath = "/students/" + cardUID + "/attendance/" + String(dateStr) + "/isOverridden";
+  String overridePath = "/students/" + studentDbId + "/attendance/" + String(dateStr) + "/isOverridden";
   if (Firebase.RTDB.getBool(&fbdo, overridePath) && fbdo.boolData() == true) {
     Serial.println("ATTENDANCE LOCKED: Admin marked Absent. Subsequent scans blocked.");
     beepDenied();
@@ -157,7 +167,7 @@ void loop() {
   // -------------------------------------------------------------
   // STEP 3: PREVENT DUPLICATE SCANS ON SAME DAY
   // -------------------------------------------------------------
-  String checkPath = "/students/" + cardUID + "/attendance/" + String(dateStr) + "/status";
+  String checkPath = "/students/" + studentDbId + "/attendance/" + String(dateStr) + "/status";
   if (Firebase.RTDB.getString(&fbdo, checkPath) && fbdo.stringData() == "Present") {
     Serial.println("DUPLICATE TAP: Student already marked Present today.");
     beepSuccess();
@@ -167,17 +177,19 @@ void loop() {
 
   // -------------------------------------------------------------
   // STEP 4: RECORD PRESENT ATTENDANCE IN UNIFIED STUDENT NODE
-  // Write to /students/{CARD_UID}/attendance/{DATE}
+  // Write to /students/{STUDENT_DB_ID}/attendance/{DATE}
   // -------------------------------------------------------------
   FirebaseJson json;
+  json.set("studentDbId", studentDbId);
   json.set("uid", cardUID);
+  json.set("rfidUID", cardUID);
   json.set("date", String(dateStr));
   json.set("time", String(timeStr));
   json.set("timestamp", (double)now);
   json.set("status", "Present");
   json.set("device", "ESP32-HARDWARE-01");
 
-  String writePath = "/students/" + cardUID + "/attendance/" + String(dateStr);
+  String writePath = "/students/" + studentDbId + "/attendance/" + String(dateStr);
   if (Firebase.RTDB.setJSON(&fbdo, writePath, &json)) {
     Serial.println("Attendance Recorded Successfully at " + writePath);
     beepSuccess();

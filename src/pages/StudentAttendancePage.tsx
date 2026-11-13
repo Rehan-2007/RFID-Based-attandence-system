@@ -16,7 +16,6 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useAttendance } from '../context/AttendanceContext';
-import { lookupStudentInfo } from '../services/firebase';
 import { getISTWeekdayName } from '../utils/dateUtils';
 
 export const StudentAttendancePage: React.FC = () => {
@@ -24,8 +23,14 @@ export const StudentAttendancePage: React.FC = () => {
   const {
     allAttendance,
     todayAttendance,
+    studentsList,
     refreshAttendance,
     isRefreshing,
+    isLoading,
+    isDbConnected,
+    dbErrorMessage,
+    dbDiagnostic,
+    retryConnection,
     applicableWorkingDates,
     workingDays,
     todayStr,
@@ -38,35 +43,37 @@ export const StudentAttendancePage: React.FC = () => {
   const [monthFilter, setMonthFilter] = useState<string>('all');
   const [refreshNotification, setRefreshNotification] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
-  // Resilient student metadata resolution
-  const resolvedInfo = useMemo(() => {
+  const studentProfile = useMemo(() => {
     return (
-      lookupStudentInfo(user?.rfidUID || '') ||
-      lookupStudentInfo(user?.studentId || user?.rollNumber || '') ||
-      lookupStudentInfo(user?.uid || '') ||
-      (user?.email ? lookupStudentInfo(user.email) : null) ||
-      (user?.displayName ? lookupStudentInfo(user.displayName) : null)
+      studentsList.find(
+        (s) =>
+          (user?.studentDbId && s.studentDbId === user.studentDbId) ||
+          (user?.rfidUID && (s.rfidUID || s.uid || '').toUpperCase() === user.rfidUID.toUpperCase()) ||
+          (user?.uid && s.authUid === user.uid)
+      ) ||
+      studentsList[0] ||
+      null
     );
-  }, [user]);
+  }, [studentsList, user]);
 
-  const studentRfid = (user?.rfidUID || resolvedInfo?.rfidUID || '').trim().toUpperCase();
+  const studentRfid = (studentProfile?.rfidUID || studentProfile?.uid || user?.rfidUID || '').trim().toUpperCase();
+  const studentDbId = (studentProfile?.studentDbId || user?.studentDbId || studentRfid).trim();
   const studentAuthUid = user?.uid;
-  const studentEmail = user?.email?.toLowerCase();
-  const studentRoll = (user?.studentId || user?.rollNumber || resolvedInfo?.studentId || '').trim();
+  const studentEmail = (studentProfile?.email || user?.email || '').toLowerCase() || undefined;
+  const studentRoll = (studentProfile?.studentId || user?.studentId || user?.rollNumber || '').trim();
 
   // Build daily records for every applicable IST working date + personal record dates
   const records = useMemo(() => {
     const isMatchingStudent = (item: any): boolean => {
       if (!item) return false;
+      const itemDbId = (item.studentDbId || '')?.toString().trim();
+      if (studentDbId && itemDbId && itemDbId === studentDbId) return true;
       const itemRfid = (item.rfidUID || item.uid || item.studentRfid || '')?.toString().trim().toUpperCase();
       if (studentRfid && itemRfid && itemRfid === studentRfid) return true;
       if (studentAuthUid && (item.authUid === studentAuthUid || item.userId === studentAuthUid)) return true;
       if (studentEmail && item.email && item.email.toLowerCase() === studentEmail) return true;
       const itemRoll = (item.studentId || item.rollNumber || '')?.toString().trim().toUpperCase();
       if (studentRoll && itemRoll && itemRoll === studentRoll.toUpperCase()) return true;
-      const itemName = (item.studentName || item.name || '')?.toString().trim().toLowerCase();
-      if (user?.displayName && itemName && (itemName === user.displayName.trim().toLowerCase() || itemName.includes(user.displayName.trim().toLowerCase()))) return true;
-      if (resolvedInfo?.name && itemName && itemName.includes(resolvedInfo.name.trim().toLowerCase())) return true;
       return false;
     };
 
@@ -98,6 +105,7 @@ export const StudentAttendancePage: React.FC = () => {
 
       if (allAttendance[date]) {
         const candidates = [
+          studentDbId ? allAttendance[date][studentDbId] : undefined,
           studentRfid ? allAttendance[date][studentRfid] : undefined,
           studentRfid ? allAttendance[date][studentRfid.toLowerCase()] : undefined,
           studentAuthUid ? allAttendance[date][studentAuthUid] : undefined,
@@ -124,6 +132,7 @@ export const StudentAttendancePage: React.FC = () => {
 
       if (!isPresent && date === todayStr) {
         const todayCandidates = [
+          studentDbId ? todayAttendance[studentDbId] : undefined,
           studentRfid ? todayAttendance[studentRfid] : undefined,
           studentRfid ? todayAttendance[studentRfid.toLowerCase()] : undefined,
           studentAuthUid ? todayAttendance[studentAuthUid] : undefined,
@@ -164,7 +173,7 @@ export const StudentAttendancePage: React.FC = () => {
         studentUid: studentRfid || 'UNASSIGNED',
       };
     });
-  }, [allAttendance, todayAttendance, applicableWorkingDates, workingDays, studentRfid, studentAuthUid, studentEmail, studentRoll, user?.displayName, resolvedInfo?.name, todayStr, isAfterDeadline]);
+  }, [allAttendance, todayAttendance, applicableWorkingDates, workingDays, studentDbId, studentRfid, studentAuthUid, studentEmail, studentRoll, todayStr, isAfterDeadline]);
 
   // Unique available months for filter dropdown
   const availableMonths = useMemo(() => {
@@ -245,17 +254,50 @@ export const StudentAttendancePage: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {(dbErrorMessage || (!isLoading && !isDbConnected)) && (
+        <div className="p-4 rounded-2xl bg-rose-950/50 border border-rose-500/40 text-rose-200 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg">
+          <div className="flex items-start gap-2.5">
+            <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            <div className="space-y-0.5">
+              <p className="font-bold text-rose-300">
+                {dbErrorMessage
+                  ? `Firebase Sync Diagnostic (${dbDiagnostic.label})`
+                  : 'Realtime Database Disconnected'}
+              </p>
+              <p className="font-mono text-[11px] text-rose-200/90 break-all">
+                {dbErrorMessage || dbDiagnostic?.message || 'Realtime listener is offline. Attempting automatic reconnection...'}
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => retryConnection()}
+            className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition cursor-pointer shrink-0 flex items-center gap-1.5 self-start sm:self-auto"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            <span>Retry Sync</span>
+          </button>
+        </div>
+      )}
+
       {/* Header & Actions */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-6 rounded-3xl bg-[#0c1220] border border-slate-800 shadow-xl">
         <div>
           <div className="flex items-center gap-2.5">
             <h2 className="text-lg font-bold text-white tracking-tight">Personal Attendance Log</h2>
-            <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 text-[10px] font-mono border border-emerald-500/20">
-              Live Synced
+            <span
+              className={`px-2 py-0.5 rounded-full text-[10px] font-mono border ${
+                dbErrorMessage
+                  ? 'bg-rose-500/10 text-rose-400 border-rose-500/20'
+                  : isDbConnected
+                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                    : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+              }`}
+            >
+              {dbErrorMessage ? dbDiagnostic.label : isDbConnected ? 'Live Synced' : 'Connecting...'}
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            Unified log from <code className="text-emerald-300 font-mono">students/{studentRfid || 'UID'}/attendance</code> synced in real time
+            Unified log from <code className="text-emerald-300 font-mono">students/{studentDbId || studentRfid || 'ID'}/attendance</code> synced in real time
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2.5 self-start sm:self-auto">

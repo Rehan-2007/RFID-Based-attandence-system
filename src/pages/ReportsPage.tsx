@@ -59,7 +59,7 @@ export const ReportsPage: React.FC = () => {
 
   // Calculate student summaries
   const studentSummaries: StudentAttendanceSummary[] = useMemo(() => {
-    return studentsList.map((st) => getStudentAttendanceSummary(st.uid));
+    return studentsList.map((st) => getStudentAttendanceSummary(st.studentDbId || st.uid));
   }, [studentsList, getStudentAttendanceSummary]);
 
   // Filtered student summaries
@@ -114,7 +114,11 @@ export const ReportsPage: React.FC = () => {
         if (!uidKey || seenUids.has(uidKey)) return;
         seenUids.add(uidKey);
 
-        const student = studentsList.find((s) => s.uid.toUpperCase() === uidKey);
+        const student = studentsList.find(
+          (s) =>
+            (rec.studentDbId && s.studentDbId === rec.studentDbId) ||
+            (s.rfidUID || s.uid || '').toUpperCase() === uidKey
+        );
         const dept = rec.department || student?.department || '';
         const semester = student?.semester || '';
         const matchesDept = selectedDept === 'All' || dept === selectedDept;
@@ -457,7 +461,7 @@ export const ReportsPage: React.FC = () => {
                   const isWarning = s.percentage >= 60 && s.percentage < 75;
 
                   return (
-                    <tr key={s.student.uid} className="hover:bg-slate-850/50 transition">
+                    <tr key={s.student.studentDbId || s.student.uid} className="hover:bg-slate-850/50 transition">
                       <td className="py-3.5 px-4">
                         <p className="font-bold text-slate-100">{s.student.name}</p>
                         <p className="text-[11px] font-mono text-slate-400">{s.student.studentId}</p>

@@ -21,7 +21,6 @@ import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, PieChart, Pi
 import { useAuth } from '../context/AuthContext';
 import { useAttendance } from '../context/AttendanceContext';
 import { StudentTab } from '../components/StudentSidebar';
-import { lookupStudentInfo } from '../services/firebase';
 import { getISTYearMonthDay } from '../utils/dateUtils';
 
 interface StudentDashboardPageProps {
@@ -35,6 +34,11 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
     todayAttendance,
     refreshAttendance,
     isRefreshing,
+    isLoading,
+    isDbConnected,
+    dbErrorMessage,
+    dbDiagnostic,
+    retryConnection,
     studentsList,
     suspensions,
     applicableWorkingDates,
@@ -45,36 +49,39 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
     isTodayHoliday,
   } = useAttendance();
 
-  // Resilient student metadata resolution
-  const resolvedInfo = useMemo(() => {
-    return (
-      lookupStudentInfo(user?.rfidUID || '') ||
-      lookupStudentInfo(user?.studentId || user?.rollNumber || '') ||
-      lookupStudentInfo(user?.uid || '') ||
-      (user?.email ? lookupStudentInfo(user.email) : null) ||
-      (user?.displayName ? lookupStudentInfo(user.displayName) : null)
-    );
-  }, [user]);
-
-  const studentRfid = (user?.rfidUID || resolvedInfo?.rfidUID || '').trim().toUpperCase();
-  const studentAuthUid = user?.uid;
-  const studentEmail = user?.email?.toLowerCase();
-  const studentRoll = (user?.studentId || user?.rollNumber || resolvedInfo?.studentId || '').trim();
-
-  // Find if student profile is marked suspended or has an active suspension entry
+  // Dynamically match live synced student profile (no hardcoded fallback)
   const studentProfile = useMemo(() => {
-    return studentsList.find((s) => s.uid.toUpperCase() === studentRfid);
-  }, [studentsList, studentRfid]);
+    return (
+      studentsList.find(
+        (s) =>
+          (user?.studentDbId && s.studentDbId === user.studentDbId) ||
+          (user?.rfidUID && (s.rfidUID || s.uid || '').toUpperCase() === user.rfidUID.toUpperCase()) ||
+          (user?.uid && s.authUid === user.uid)
+      ) ||
+      studentsList[0] ||
+      null
+    );
+  }, [studentsList, user]);
+
+  const studentRfid = (studentProfile?.rfidUID || studentProfile?.uid || user?.rfidUID || '').trim().toUpperCase();
+  const studentDbId = (studentProfile?.studentDbId || user?.studentDbId || studentRfid).trim();
+  const studentAuthUid = user?.uid;
+  const studentEmail = (studentProfile?.email || user?.email || '').toLowerCase() || undefined;
+  const studentRoll = (studentProfile?.studentId || user?.studentId || user?.rollNumber || '').trim();
+  const studentNameDisplay = studentProfile?.name || user?.displayName || 'Student';
 
   const activeSuspension = useMemo(() => {
     if (studentProfile?.activeSuspension && studentProfile.status === 'suspended') {
       return studentProfile.activeSuspension;
     }
-    const studentSuspList = suspensions[studentRfid] || [];
+    const studentSuspList =
+      (studentDbId ? suspensions[studentDbId] : undefined) ||
+      (studentRfid ? suspensions[studentRfid] : undefined) ||
+      [];
     return studentSuspList.find(
       (s: any) => s.status === 'active' && s.endDate >= todayStr
     );
-  }, [studentProfile, suspensions, studentRfid, todayStr]);
+  }, [studentProfile, suspensions, studentDbId, studentRfid, todayStr]);
 
   const isSuspended = Boolean(activeSuspension || studentProfile?.status === 'suspended' || studentProfile?.isSuspended);
 
@@ -93,15 +100,14 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
     // Helper to test if a record belongs to this student
     const isMatchingStudent = (item: any): boolean => {
       if (!item) return false;
+      const itemDbId = (item.studentDbId || '')?.toString().trim();
+      if (studentDbId && itemDbId && itemDbId === studentDbId) return true;
       const itemRfid = (item.rfidUID || item.uid || item.studentRfid || '')?.toString().trim().toUpperCase();
       if (studentRfid && itemRfid && itemRfid === studentRfid) return true;
       if (studentAuthUid && (item.authUid === studentAuthUid || item.userId === studentAuthUid)) return true;
       if (studentEmail && item.email && item.email.toLowerCase() === studentEmail) return true;
       const itemRoll = (item.studentId || item.rollNumber || '')?.toString().trim().toUpperCase();
       if (studentRoll && itemRoll && itemRoll === studentRoll.toUpperCase()) return true;
-      const itemName = (item.studentName || item.name || '')?.toString().trim().toLowerCase();
-      if (user?.displayName && itemName && (itemName === user.displayName.trim().toLowerCase() || itemName.includes(user.displayName.trim().toLowerCase()))) return true;
-      if (resolvedInfo?.name && itemName && itemName.includes(resolvedInfo.name.trim().toLowerCase())) return true;
       return false;
     };
 
@@ -110,8 +116,8 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
     dateKeys.forEach((date) => {
       const dayData = allAttendance[date];
       if (dayData) {
-        // Direct key lookups + entry scanning
         const candidates = [
+          studentDbId ? dayData[studentDbId] : undefined,
           studentRfid ? dayData[studentRfid] : undefined,
           studentRfid ? dayData[studentRfid.toLowerCase()] : undefined,
           studentAuthUid ? dayData[studentAuthUid] : undefined,
@@ -120,7 +126,6 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
 
         for (const item of candidates) {
           if (item && isMatchingStudent(item)) {
-            // Ignore deleted records
             if (item.isDeleted) continue;
 
             const dateVal = item.date || date;
@@ -141,6 +146,7 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
 
     // 2. Also check todayAttendance (strictly for todayStr)
     const todayCandidates = [
+      studentDbId ? todayAttendance[studentDbId] : undefined,
       studentRfid ? todayAttendance[studentRfid] : undefined,
       studentRfid ? todayAttendance[studentRfid.toLowerCase()] : undefined,
       studentAuthUid ? todayAttendance[studentAuthUid] : undefined,
@@ -167,7 +173,7 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
     }
 
     return Array.from(recordsMap.values()).sort((a, b) => b.timestamp - a.timestamp);
-  }, [allAttendance, todayAttendance, studentRfid, studentAuthUid, studentEmail, studentRoll, user?.displayName, resolvedInfo?.name, todayStr]);
+  }, [allAttendance, todayAttendance, studentDbId, studentRfid, studentAuthUid, studentEmail, studentRoll, todayStr]);
 
   // Total applicable institutional working days (excludes holidays & future dates)
   const allRecordedDates = useMemo(() => {
@@ -180,6 +186,7 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
     if (matchRecord) return matchRecord;
 
     const todayCandidates = [
+      studentDbId ? todayAttendance[studentDbId] : undefined,
       studentRfid ? todayAttendance[studentRfid] : undefined,
       studentRfid ? todayAttendance[studentRfid.toLowerCase()] : undefined,
       studentAuthUid ? todayAttendance[studentAuthUid] : undefined,
@@ -190,7 +197,8 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
         item &&
         !item.isDeleted &&
         (item.date === todayStr || !item.date) &&
-        ((studentRfid && (item.rfidUID?.toUpperCase() === studentRfid || item.uid?.toUpperCase() === studentRfid)) ||
+        ((studentDbId && item.studentDbId === studentDbId) ||
+          (studentRfid && (item.rfidUID?.toUpperCase() === studentRfid || item.uid?.toUpperCase() === studentRfid)) ||
           (studentAuthUid && (item.authUid === studentAuthUid || item.userId === studentAuthUid)))
       ) {
         return {
@@ -206,7 +214,7 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
     }
 
     return null;
-  }, [studentRecords, todayAttendance, todayStr, studentRfid, studentAuthUid]);
+  }, [studentRecords, todayAttendance, todayStr, studentDbId, studentRfid, studentAuthUid]);
 
   const isPresentToday = Boolean(todayRecord && todayRecord.status === 'Present');
   const isExplicitAbsentToday = Boolean(todayRecord && todayRecord.status === 'Absent');
@@ -279,6 +287,32 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
 
   return (
     <div className="space-y-6">
+      {/* Firebase Connection / Permission / Missing UID Diagnostic Banner */}
+      {(dbErrorMessage || (!isLoading && !isDbConnected)) && (
+        <div className="p-4 rounded-2xl bg-rose-950/50 border border-rose-500/40 text-rose-200 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg">
+          <div className="flex items-start gap-2.5">
+            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            <div className="space-y-0.5">
+              <p className="font-bold text-rose-300">
+                {dbErrorMessage
+                  ? `Firebase Sync Diagnostic (${dbDiagnostic.label})`
+                  : 'Realtime Database Disconnected'}
+              </p>
+              <p className="font-mono text-[11px] text-rose-200/90 break-all">
+                {dbErrorMessage || dbDiagnostic?.message || 'Realtime listener is offline. Reconnecting to Firebase RTDB...'}
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => retryConnection()}
+            className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition cursor-pointer shrink-0 flex items-center gap-1.5 self-start sm:self-auto"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            <span>Retry Sync</span>
+          </button>
+        </div>
+      )}
+
       {/* Student Account Suspension Alert Banner */}
       {isSuspended && (
         <div className="p-4 sm:p-5 rounded-3xl bg-gradient-to-r from-amber-950/60 via-red-950/40 to-slate-900 border border-amber-500/40 text-amber-200 shadow-xl flex items-start gap-3.5 animate-in fade-in slide-in-from-top-2">
@@ -314,12 +348,12 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
         <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
           <div className="flex items-start sm:items-center gap-4">
             <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-2xl bg-gradient-to-tr from-emerald-600 via-teal-600 to-cyan-500 flex items-center justify-center text-white text-2xl font-extrabold shadow-xl shadow-emerald-500/20 border border-emerald-400/30 shrink-0">
-              {user?.displayName ? user.displayName.charAt(0).toUpperCase() : 'S'}
+              {studentNameDisplay.charAt(0).toUpperCase()}
             </div>
             <div>
               <div className="flex flex-wrap items-center gap-2 mb-1">
                 <h2 className="text-xl sm:text-2xl font-extrabold text-white tracking-tight">
-                  {user?.displayName || 'Student'}
+                  {studentNameDisplay}
                 </h2>
                 <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/25 text-[11px] font-semibold text-emerald-400">
                   Student Account
@@ -327,20 +361,20 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
               </div>
               <p className="text-xs sm:text-sm text-slate-400 flex items-center gap-2">
                 <GraduationCap className="w-4 h-4 text-emerald-400" />
-                <span>Roll No: <strong className="text-slate-200 font-mono">{user?.studentId || 'N/A'}</strong></span>
+                <span>Roll No: <strong className="text-slate-200 font-mono">{studentRoll || 'N/A'}</strong></span>
                 <span className="text-slate-600">&bull;</span>
-                <span>{user?.department || 'Department of Technology'}</span>
+                <span>{studentProfile?.department || user?.department || 'Department of Technology'}</span>
               </p>
               <div className="mt-2.5 flex flex-wrap gap-2 text-[11px]">
-                {user?.year && (
+                {(studentProfile?.year || user?.year) && (
                   <span className="px-2 py-0.5 rounded-md bg-slate-800/80 text-slate-300 border border-slate-700/60 flex items-center gap-1">
                     <CalendarDays className="w-3 h-3 text-cyan-400" />
-                    <span>{user.year}</span>
+                    <span>{studentProfile?.year || user?.year}</span>
                   </span>
                 )}
-                {user?.semester && (
+                {(studentProfile?.semester || user?.semester) && (
                   <span className="px-2 py-0.5 rounded-md bg-slate-800/80 text-slate-300 border border-slate-700/60">
-                    {user.semester}
+                    {studentProfile?.semester || user?.semester}
                   </span>
                 )}
                 <span className="px-2 py-0.5 rounded-md bg-emerald-950/60 text-emerald-300 border border-emerald-500/30 font-mono flex items-center gap-1">
@@ -616,7 +650,11 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
         {studentRecords.length === 0 ? (
           <div className="p-8 text-center rounded-2xl bg-slate-900/40 border border-dashed border-slate-800">
             <CreditCard className="w-8 h-8 text-slate-600 mx-auto mb-2" />
-            <p className="text-xs text-slate-400 font-medium">No RFID attendance scans recorded yet</p>
+            <p className="text-xs text-slate-400 font-medium">
+              {dbDiagnostic.code === 'empty_records'
+                ? 'Attendance records are currently empty'
+                : 'No RFID attendance scans recorded yet'}
+            </p>
             <p className="text-[11px] text-slate-500 mt-1">
               When your RFID card ({studentRfid || 'UID'}) is scanned at the hardware terminal, it will appear here automatically in real time.
             </p>

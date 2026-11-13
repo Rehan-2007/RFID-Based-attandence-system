@@ -1,6 +1,7 @@
 import React, { useState, Suspense, lazy } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { AttendanceProvider } from './context/AttendanceContext';
+import { getFirebaseAuth } from './services/firebase';
 import { Sidebar, NavPage } from './components/Sidebar';
 import { Navbar } from './components/Navbar';
 import { RFIDScannerModal } from './components/RFIDScannerModal';
@@ -14,7 +15,9 @@ import {
   RefreshCw, 
   LogOut, 
   CheckCircle2, 
-  Loader2 
+  Loader2,
+  Copy,
+  Check
 } from 'lucide-react';
 
 // Student Portal Layout Components
@@ -99,7 +102,7 @@ function AuthProgressScreen() {
             RFID Attendance Portal
           </h2>
           <p className="text-xs text-slate-400 mb-6">
-            Establishing secure connection
+            Establishing verified Firebase session
           </p>
 
           {/* Progress Steps */}
@@ -119,15 +122,15 @@ function AuthProgressScreen() {
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-xs font-semibold leading-tight text-white">
-                  1. Authentication
+                  1. Firebase Authentication
                 </p>
                 <p className="text-[11px] text-slate-400 truncate">
-                  {isProfileStep ? 'Account authenticated' : 'Verifying credentials...'}
+                  {isProfileStep ? 'UID verified cleanly' : 'Verifying credentials...'}
                 </p>
               </div>
             </div>
 
-            {/* Step 2: Dashboard & Role Sync */}
+            {/* Step 2: Role & Profile Verification */}
             <div className={`p-3 rounded-xl border transition-all flex items-center gap-3 ${
               isProfileStep 
                 ? 'bg-slate-900/90 border-cyan-500/40 text-cyan-300' 
@@ -144,10 +147,10 @@ function AuthProgressScreen() {
               </div>
               <div className="flex-1 min-w-0">
                 <p className={`text-xs font-semibold leading-tight ${isProfileStep ? 'text-white' : 'text-slate-400'}`}>
-                  2. Dashboard &amp; Role Sync
+                  2. Profile &amp; Role Verification
                 </p>
                 <p className="text-[11px] text-slate-500 truncate">
-                  {isProfileStep ? 'Loading your dashboard...' : 'Pending authentication'}
+                  {isProfileStep ? 'Reading /users/{uid} & student mapping...' : 'Pending authentication'}
                 </p>
               </div>
             </div>
@@ -185,8 +188,38 @@ function AuthProgressScreen() {
  * Dedicated Error Recovery Screen
  */
 function AuthErrorScreen() {
-  const { authError, retryProfileLoad, logout } = useAuth();
+  const { authError, authDiagnosticCode, authDiagnosticPath, profileMissing, retryProfileLoad, logout } = useAuth();
   const [retrying, setRetrying] = useState(false);
+  const [copiedUid, setCopiedUid] = useState(false);
+
+  const currentFbUser = React.useMemo(() => {
+    try {
+      return getFirebaseAuth().currentUser;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const currentUid = currentFbUser?.uid || null;
+  const currentEmail = currentFbUser?.email || null;
+
+  const badgeLabel =
+    authDiagnosticCode === 'permission_denied'
+      ? 'PERMISSION DENIED'
+      : authDiagnosticCode === 'mapping_missing'
+        ? 'MAPPING MISSING'
+        : authDiagnosticCode === 'not_registered' || profileMissing
+          ? 'PROFILE MISSING'
+          : authDiagnosticCode === 'auth_expired'
+            ? 'SESSION EXPIRED'
+            : 'CONNECTION ERROR';
+
+  const handleCopyUid = () => {
+    if (!currentUid) return;
+    navigator.clipboard.writeText(currentUid);
+    setCopiedUid(true);
+    setTimeout(() => setCopiedUid(false), 2000);
+  };
 
   const handleRetry = async () => {
     setRetrying(true);
@@ -203,7 +236,7 @@ function AuthErrorScreen() {
       <div className="absolute top-1/4 -left-32 w-96 h-96 bg-rose-600/10 rounded-full blur-3xl pointer-events-none" />
       <div className="absolute bottom-1/4 -right-32 w-96 h-96 bg-amber-600/10 rounded-full blur-3xl pointer-events-none" />
 
-      <div className="w-full max-w-md relative z-10 animate-in fade-in zoom-in-95 duration-200">
+      <div className="w-full max-w-lg relative z-10 animate-in fade-in zoom-in-95 duration-200">
         <div className="p-7 rounded-3xl bg-[#0c1220]/90 backdrop-blur-2xl border border-rose-500/30 shadow-2xl shadow-black/80 text-center">
           
           {/* Warning Icon */}
@@ -213,16 +246,69 @@ function AuthErrorScreen() {
             </div>
           </div>
 
+          <div className="mb-2">
+            <span className="inline-flex px-2.5 py-0.5 rounded-full bg-rose-500/15 border border-rose-500/30 text-rose-300 font-mono text-[10px] font-bold tracking-wider">
+              {badgeLabel}
+            </span>
+          </div>
+
           <h2 className="text-lg font-bold text-white tracking-tight mb-1">
             Access Configuration Notice
           </h2>
-          <p className="text-xs text-slate-400 mb-5">
-            Your login succeeded, but your role or profile needs attention.
+          <p className="text-xs text-slate-400 mb-4">
+            Firebase sign-in succeeded, but reading or verifying your profile requires administrator attention.
           </p>
 
+          {/* Diagnostic Metadata */}
+          {(currentUid || authDiagnosticPath) && (
+            <div className="p-3 rounded-xl bg-slate-950/90 border border-slate-800 text-left mb-3 space-y-1.5 font-mono text-[11px]">
+              {currentEmail && (
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-500">Account:</span>
+                  <span className="text-slate-200 truncate">{currentEmail}</span>
+                </div>
+              )}
+              {currentUid && (
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-500">Firebase UID:</span>
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="text-cyan-300 truncate">{currentUid}</span>
+                    <button
+                      type="button"
+                      onClick={handleCopyUid}
+                      title="Copy Firebase UID for Administrator"
+                      className="text-slate-400 hover:text-white transition cursor-pointer shrink-0"
+                    >
+                      {copiedUid ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                </div>
+              )}
+              {authDiagnosticPath && (
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-500">Database Path:</span>
+                  <span className="text-amber-300 truncate">{authDiagnosticPath}</span>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Actual Error Message Box */}
-          <div className="p-3.5 rounded-xl bg-rose-950/40 border border-rose-500/30 text-rose-200 text-xs text-left mb-6 leading-relaxed">
+          <div className="p-3.5 rounded-xl bg-rose-950/40 border border-rose-500/30 text-rose-200 text-xs text-left mb-4 leading-relaxed">
             {authError || 'Your account exists, but your student profile has not been configured. Contact your administrator.'}
+          </div>
+
+          {/* Targeted Remediation Hint */}
+          <div className="p-3 rounded-xl bg-slate-900/70 border border-slate-800 text-slate-300 text-[11px] text-left mb-5 leading-relaxed">
+            {authDiagnosticCode === 'permission_denied' ? (
+              <span>
+                <strong>Administrator Fix:</strong> Publish the updated Realtime Database &amp; Firestore security rules from <span className="text-cyan-300 font-semibold">Admin Settings</span> so authenticated users can read their own <code className="text-cyan-300">/users/&#123;auth.uid&#125;</code> and linked student profile.
+              </span>
+            ) : (
+              <span>
+                <strong>Administrator Fix:</strong> Open <span className="text-cyan-300 font-semibold">Admin &rarr; Settings &rarr; Database Validation &amp; Recovery</span> (or edit the student in <span className="text-cyan-300 font-semibold">Students</span>) and link the Firebase UID shown above to your existing student record.
+              </span>
+            )}
           </div>
 
           {/* Recovery Actions */}

@@ -6,7 +6,7 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    // Helper function: check if user is admin
+    // Helper function: check if user is admin (bootstrap UID or verified admin role in users/{uid})
     function isAdmin() {
       return isAuthenticated() && (
         request.auth.uid == 'bi3c890VUXhVE0JFxroYfnlQwea2' ||
@@ -22,12 +22,21 @@ service cloud.firestore {
 
     // Users collection rules:
     // - Administrators can read and manage all user documents
-    // - Students can only read and update their own document
-    // - Students are strictly forbidden from accessing other students' documents
+    // - Users can read only their own document
+    // - Students CANNOT create accounts or modify role/uid/rfidUID/studentDbId/rollNumber/email
     match /users/{userId} {
       allow read: if isAdmin() || isOwner(userId);
-      allow create, update: if isAdmin() || (isOwner(userId) && request.resource.data.role == 'student');
-      allow delete: if isAdmin();
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() || (
+        isOwner(userId) &&
+        request.resource.data.role == 'student' &&
+        request.resource.data.role == resource.data.role &&
+        request.resource.data.uid == resource.data.uid &&
+        request.resource.data.rfidUID == resource.data.rfidUID &&
+        request.resource.data.studentDbId == resource.data.studentDbId &&
+        request.resource.data.rollNumber == resource.data.rollNumber &&
+        request.resource.data.email == resource.data.email
+      );
     }
 
     // Students registry:
@@ -37,7 +46,12 @@ service cloud.firestore {
       allow read: if isAdmin() || (
         isAuthenticated() && (
           resource.data.authUid == request.auth.uid ||
-          resource.data.email == request.auth.token.email
+          (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+           (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentDbId == studentId ||
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.rfidUID == studentId)) ||
+          (resource.data.email is string &&
+           request.auth.token.email is string &&
+           resource.data.email.lower() == request.auth.token.email.lower())
         )
       );
       allow write: if isAdmin();
@@ -52,7 +66,8 @@ service cloud.firestore {
           resource.data.authUid == request.auth.uid ||
           resource.data.userId == request.auth.uid ||
           (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-           (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.rfidUID == resource.data.rfidUID ||
+           (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentDbId == resource.data.studentDbId ||
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.rfidUID == resource.data.rfidUID ||
             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.rfidUID == resource.data.rfidUid ||
             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.rfidUID == resource.data.uid))
         )

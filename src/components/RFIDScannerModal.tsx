@@ -95,10 +95,11 @@ export const RFIDScannerModal: React.FC<RFIDScannerModalProps> = ({ isOpen, onCl
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
               {studentsList.slice(0, 3).map((st) => {
-                const isPresent = Boolean(todayAttendance[st.uid]);
+                const dbKey = st.studentDbId || st.uid;
+                const isPresent = Boolean(todayAttendance[dbKey] || todayAttendance[st.uid]);
                 return (
                   <button
-                    key={st.uid}
+                    key={dbKey}
                     disabled={isScanning}
                     onClick={() => handleScan(st.uid)}
                     className={`p-3 rounded-xl border text-left transition relative group overflow-hidden ${
@@ -137,7 +138,7 @@ export const RFIDScannerModal: React.FC<RFIDScannerModalProps> = ({ isOpen, onCl
             <div className="flex gap-2">
               <input
                 type="text"
-                placeholder="e.g. 5AA5AB24 or 99FA1122"
+                placeholder="e.g. A1B2C3D4 or 99FA1122"
                 value={customUid}
                 onChange={(e) => setCustomUid(e.target.value.toUpperCase())}
                 onKeyDown={(e) => e.key === 'Enter' && handleScan(customUid)}

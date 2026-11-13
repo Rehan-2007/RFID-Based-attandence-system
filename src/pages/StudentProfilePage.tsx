@@ -17,22 +17,29 @@ import {
   Building2
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { lookupStudentInfo } from '../services/firebase';
+import { useAttendance } from '../context/AttendanceContext';
 
 export const StudentProfilePage: React.FC = () => {
   const { user, changePassword, sendResetEmail, logout } = useAuth();
+  const { studentsList } = useAttendance();
 
-  const resolved = 
-    lookupStudentInfo(user?.rfidUID || '') || 
-    lookupStudentInfo(user?.studentId || user?.rollNumber || '') || 
-    lookupStudentInfo(user?.uid || '') || 
-    (user?.email ? lookupStudentInfo(user.email) : null) ||
-    (user?.displayName ? lookupStudentInfo(user.displayName) : null);
+  const liveProfile =
+    studentsList.find(
+      (s) =>
+        (user?.studentDbId && s.studentDbId === user.studentDbId) ||
+        (user?.rfidUID && (s.rfidUID || s.uid || '').toUpperCase() === user.rfidUID.toUpperCase()) ||
+        (user?.uid && s.authUid === user.uid)
+    ) ||
+    studentsList[0] ||
+    null;
 
-  const studentName = user?.displayName || resolved?.name || 'Student';
-  const studentRoll = user?.studentId || user?.rollNumber || resolved?.studentId || 'N/A';
-  const studentRfid = user?.rfidUID || resolved?.rfidUID || 'Not Assigned';
-  const studentDept = user?.department || resolved?.department || 'Engineering';
+  const studentName = liveProfile?.name || user?.displayName || 'Student';
+  const studentRoll = liveProfile?.studentId || user?.studentId || user?.rollNumber || 'N/A';
+  const studentRfid = liveProfile?.rfidUID || liveProfile?.uid || user?.rfidUID || 'Not Assigned';
+  const studentDept = liveProfile?.department || user?.department || 'N/A';
+  const studentYear = liveProfile?.year || user?.year || 'N/A';
+  const studentSemester = liveProfile?.semester || user?.semester || 'N/A';
+  const studentEmail = liveProfile?.email || user?.email || 'student@institution.edu';
 
 
   const [newPassword, setNewPassword] = useState('');
@@ -97,19 +104,19 @@ export const StudentProfilePage: React.FC = () => {
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-6">
           <div className="flex items-center gap-4">
             <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-2xl bg-gradient-to-tr from-emerald-600 via-teal-600 to-cyan-500 flex items-center justify-center text-white text-2xl font-extrabold shadow-xl shadow-emerald-500/25 border border-emerald-400/30">
-              {user?.displayName ? user.displayName.charAt(0).toUpperCase() : 'S'}
+              {studentName.charAt(0).toUpperCase()}
             </div>
             <div>
               <div className="flex items-center gap-2">
                 <h2 className="text-xl font-bold text-white tracking-tight">
-                  {user?.displayName || 'Student Profile'}
+                  {studentName}
                 </h2>
                 <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/25 text-[10px] font-mono font-semibold text-emerald-400">
                   STUDENT
                 </span>
               </div>
               <p className="text-xs text-slate-400 mt-1">
-                {user?.email || 'student@institution.edu'}
+                {studentEmail}
               </p>
             </div>
           </div>
@@ -151,11 +158,11 @@ export const StudentProfilePage: React.FC = () => {
             <div className="grid grid-cols-2 gap-3">
               <div className="p-3 rounded-2xl bg-slate-900 border border-slate-800/80">
                 <span className="text-[10px] font-mono uppercase text-slate-400 block mb-0.5">Academic Year</span>
-                <span className="text-xs font-semibold text-slate-200">{user?.year || 'Final Year'}</span>
+                <span className="text-xs font-semibold text-slate-200">{studentYear}</span>
               </div>
               <div className="p-3 rounded-2xl bg-slate-900 border border-slate-800/80">
                 <span className="text-[10px] font-mono uppercase text-slate-400 block mb-0.5">Semester</span>
-                <span className="text-xs font-semibold text-slate-200">{user?.semester || 'Semester 8'}</span>
+                <span className="text-xs font-semibold text-slate-200">{studentSemester}</span>
               </div>
             </div>
 

@@ -59,7 +59,9 @@ export const StudentSuspensionModal: React.FC<StudentSuspensionModalProps> = ({
     student.status === 'suspended' || student.isSuspended || (student.activeSuspension && student.activeSuspension.status === 'active')
   );
 
-  const studentSuspensionHistory: StudentSuspension[] = (suspensions && suspensions[student.uid]) || [];
+  const dbKey = student.studentDbId || student.uid;
+  const studentSuspensionHistory: StudentSuspension[] =
+    (suspensions && (suspensions[dbKey] || suspensions[student.uid])) || [];
 
   const handleSuspend = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -76,7 +78,7 @@ export const StudentSuspensionModal: React.FC<StudentSuspensionModalProps> = ({
     setErrorMsg(null);
 
     const res = await suspendStudentAccount(
-      student.uid,
+      dbKey,
       duration,
       startDate,
       endDate,
@@ -98,7 +100,7 @@ export const StudentSuspensionModal: React.FC<StudentSuspensionModalProps> = ({
     setErrorMsg(null);
 
     const res = await unsuspendStudentAccount(
-      student.uid,
+      dbKey,
       unsuspendReason.trim() || 'Manual unsuspension by administrator'
     );
 

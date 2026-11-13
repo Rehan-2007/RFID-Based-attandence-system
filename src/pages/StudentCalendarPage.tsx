@@ -8,11 +8,12 @@ import {
   Clock, 
   Cpu, 
   CreditCard,
-  Info
+  Info,
+  AlertTriangle,
+  RefreshCw
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useAttendance } from '../context/AttendanceContext';
-import { lookupStudentInfo } from '../services/firebase';
 import { formatISTDateFull, getISTYearMonthDay } from '../utils/dateUtils';
 
 export const StudentCalendarPage: React.FC = () => {
@@ -20,11 +21,17 @@ export const StudentCalendarPage: React.FC = () => {
   const {
     allAttendance,
     todayAttendance,
+    studentsList,
     workingDays,
     applicableWorkingDates,
     todayStr,
     isAfterDeadline,
     attendanceDeadline,
+    isLoading,
+    isDbConnected,
+    dbErrorMessage,
+    dbDiagnostic,
+    retryConnection,
   } = useAttendance();
 
   const [currentDate, setCurrentDate] = useState(() => {
@@ -33,18 +40,24 @@ export const StudentCalendarPage: React.FC = () => {
   });
   const [selectedDayStr, setSelectedDayStr] = useState<string | null>(null);
 
-  const resolvedInfo = useMemo(() => {
+  const studentProfile = useMemo(() => {
     return (
-      lookupStudentInfo(user?.rfidUID || '') ||
-      lookupStudentInfo(user?.studentId || user?.rollNumber || '') ||
-      lookupStudentInfo(user?.uid || '') ||
-      (user?.email ? lookupStudentInfo(user.email) : null)
+      studentsList.find(
+        (s) =>
+          (user?.studentDbId && s.studentDbId === user.studentDbId) ||
+          (user?.rfidUID && (s.rfidUID || s.uid || '').toUpperCase() === user.rfidUID.toUpperCase()) ||
+          (user?.uid && s.authUid === user.uid)
+      ) ||
+      studentsList[0] ||
+      null
     );
-  }, [user]);
+  }, [studentsList, user]);
 
-  const studentRfid = useMemo(() => {
-    return (user?.rfidUID || resolvedInfo?.rfidUID || '').trim().toUpperCase();
-  }, [user?.rfidUID, resolvedInfo]);
+  const studentRfid = (studentProfile?.rfidUID || studentProfile?.uid || user?.rfidUID || '').trim().toUpperCase();
+  const studentDbId = (studentProfile?.studentDbId || user?.studentDbId || studentRfid).trim();
+  const studentAuthUid = user?.uid;
+  const studentEmail = (studentProfile?.email || user?.email || '').toLowerCase() || undefined;
+  const studentRoll = (studentProfile?.studentId || user?.studentId || user?.rollNumber || '').trim();
 
   const year = currentDate.getFullYear();
   const month = currentDate.getMonth(); // 0-indexed
@@ -83,20 +96,22 @@ export const StudentCalendarPage: React.FC = () => {
     let time = '--:--:--';
     let device = 'ESP32-RFID-01';
 
-    const studentAuthUid = user?.uid;
-    const studentRoll = user?.studentId || user?.rollNumber || resolvedInfo?.studentId;
     const isMatchingStudent = (item: any): boolean => {
       if (!item) return false;
+      const itemDbId = (item.studentDbId || '')?.toString().trim();
+      if (studentDbId && itemDbId && itemDbId === studentDbId) return true;
       const itemRfid = (item.rfidUID || item.uid || item.studentRfid || '')?.toString().trim().toUpperCase();
       if (studentRfid && itemRfid && itemRfid === studentRfid) return true;
       if (studentAuthUid && (item.authUid === studentAuthUid || item.userId === studentAuthUid)) return true;
+      if (studentEmail && item.email && item.email.toLowerCase() === studentEmail) return true;
       const itemRoll = (item.studentId || item.rollNumber || '')?.toString().trim().toUpperCase();
-      if (studentRoll && itemRoll && itemRoll === studentRoll.trim().toUpperCase()) return true;
+      if (studentRoll && itemRoll && itemRoll === studentRoll.toUpperCase()) return true;
       return false;
     };
 
     if (allAttendance[dStr]) {
       const candidates = [
+        studentDbId ? allAttendance[dStr][studentDbId] : undefined,
         studentRfid ? allAttendance[dStr][studentRfid] : undefined,
         studentRfid ? allAttendance[dStr][studentRfid.toLowerCase()] : undefined,
         studentAuthUid ? allAttendance[dStr][studentAuthUid] : undefined,
@@ -120,6 +135,7 @@ export const StudentCalendarPage: React.FC = () => {
 
     if (!isPresent && isToday) {
       const todayCandidates = [
+        studentDbId ? todayAttendance[studentDbId] : undefined,
         studentRfid ? todayAttendance[studentRfid] : undefined,
         studentRfid ? todayAttendance[studentRfid.toLowerCase()] : undefined,
         studentAuthUid ? todayAttendance[studentAuthUid] : undefined,
@@ -171,7 +187,7 @@ export const StudentCalendarPage: React.FC = () => {
     const total = present + absent;
     const percentage = total > 0 ? Math.round((present / total) * 100) : 0;
     return { present, absent, total, percentage };
-  }, [year, month, daysInMonth, allRecordedDates, workingDays, studentRfid, allAttendance, todayAttendance, isAfterDeadline]);
+  }, [year, month, daysInMonth, allRecordedDates, workingDays, studentDbId, studentRfid, allAttendance, todayAttendance, isAfterDeadline]);
 
   // Selected date details
   const selectedDayInfo = useMemo(() => {
@@ -179,7 +195,7 @@ export const StudentCalendarPage: React.FC = () => {
     const parts = selectedDayStr.split('-');
     const dayNum = parseInt(parts[2], 10);
     return getDayAttendance(dayNum);
-  }, [selectedDayStr, year, month, allRecordedDates, workingDays, studentRfid, allAttendance, todayAttendance]);
+  }, [selectedDayStr, year, month, allRecordedDates, workingDays, studentDbId, studentRfid, allAttendance, todayAttendance]);
 
   const monthNames = [
     'January', 'February', 'March', 'April', 'May', 'June',
@@ -188,6 +204,32 @@ export const StudentCalendarPage: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {/* Firebase Real-Time Sync / Permission / Missing UID Diagnostic Banner */}
+      {(dbErrorMessage || (!isLoading && !isDbConnected)) && (
+        <div className="p-4 rounded-2xl bg-rose-950/35 border border-rose-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-2.5 text-rose-200 text-xs">
+            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-bold text-rose-300">
+                {dbErrorMessage
+                  ? `Firebase Attendance Diagnostic (${dbDiagnostic.label})`
+                  : 'Realtime Database Disconnected'}
+              </p>
+              <p className="text-rose-200/80 mt-0.5 font-mono text-[11px]">
+                {dbErrorMessage || dbDiagnostic?.message || 'Connection to Firebase Realtime Database lost. Attempting automatic reconnection...'}
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => retryConnection()}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-200 text-xs font-semibold cursor-pointer self-start sm:self-auto shrink-0"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            <span>Retry Sync</span>
+          </button>
+        </div>
+      )}
+
       {/* Calendar Header with Navigation */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-6 rounded-3xl bg-[#0c1220] border border-slate-800 shadow-xl">
         <div className="flex items-center gap-3">

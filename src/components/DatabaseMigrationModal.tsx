@@ -211,13 +211,13 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
                 </h4>
                 <span
                   className={`px-2 py-0.5 rounded-full text-[10px] font-mono border ${
-                    (migrationInspection?.authenticatedUid ?? user?.uid) === CONFIGURED_ADMIN_UID
+                    user?.role === 'admin' || (migrationInspection?.authenticatedUid ?? user?.uid) === CONFIGURED_ADMIN_UID
                       ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
                       : 'bg-rose-500/10 text-rose-300 border-rose-500/30'
                   }`}
                 >
                   Auth UID: {migrationInspection?.authenticatedUid ?? user?.uid ?? 'Not Signed In'}
-                  {(migrationInspection?.authenticatedUid ?? user?.uid) === CONFIGURED_ADMIN_UID
+                  {user?.role === 'admin' || (migrationInspection?.authenticatedUid ?? user?.uid) === CONFIGURED_ADMIN_UID
                     ? ' (Admin Verified)'
                     : ' (Mismatch)'}
                 </span>
@@ -504,8 +504,8 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
                       >
                         <option value="">-- Assign to Student --</option>
                         {studentsList.map((s) => (
-                          <option key={s.uid} value={s.uid}>
-                            {s.name} ({s.uid})
+                          <option key={s.studentDbId || s.uid} value={s.studentDbId || s.uid}>
+                            {s.name} ({s.rfidUID || s.uid})
                           </option>
                         ))}
                       </select>

@@ -16,13 +16,15 @@ import {
   Calendar,
   Filter,
   CheckCircle2,
-  Sparkles,
   UserX,
-  ShieldAlert
+  ShieldAlert,
+  Link2,
+  UserCheck
 } from 'lucide-react';
 import { Student } from '../types';
 import { useAttendance } from '../context/AttendanceContext';
 import { StudentSuspensionModal } from '../components/StudentSuspensionModal';
+import { linkAuthUidToStudent, provisionAuthForExistingStudent } from '../services/firebase';
 
 interface StudentsPageProps {
   onOpenScanner: () => void;
@@ -34,12 +36,12 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
     addOrUpdateStudent, 
     createStudentAccount,
     deleteStudent, 
-    seedDefaultStudents,
     todayAttendance,
     scanRfidCard,
     isAfterDeadline,
     isTodayHoliday,
-    attendanceDeadline
+    attendanceDeadline,
+    retryConnection
   } = useAttendance();
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -52,6 +54,10 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
   const [studentToDelete, setStudentToDelete] = useState<Student | null>(null);
   const [suspensionStudent, setSuspensionStudent] = useState<Student | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [authRecoveryUid, setAuthRecoveryUid] = useState('');
+  const [authRecoveryPassword, setAuthRecoveryPassword] = useState('');
+  const [isLinkingAuth, setIsLinkingAuth] = useState(false);
+  const [authRecoverySuccess, setAuthRecoverySuccess] = useState<string | null>(null);
 
   // Form states
   const [formData, setFormData] = useState<Partial<Student & { password?: string; createAuthAccount?: boolean }>>({
@@ -121,8 +127,57 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
       createAuthAccount: false,
       password: '',
     });
+    setAuthRecoveryUid('');
+    setAuthRecoveryPassword('');
+    setAuthRecoverySuccess(null);
     setFormError(null);
     setIsModalOpen(true);
+  };
+
+  const handleLinkExistingAuthUid = async () => {
+    if (!editingStudent || !authRecoveryUid.trim()) return;
+    const targetDbId = editingStudent.studentDbId || editingStudent.uid;
+    setIsLinkingAuth(true);
+    setFormError(null);
+    setAuthRecoverySuccess(null);
+    try {
+      const res = await linkAuthUidToStudent(targetDbId, authRecoveryUid.trim(), formData.email?.trim() || undefined);
+      setEditingStudent({ ...editingStudent, authUid: res.authUid });
+      setAuthRecoveryUid('');
+      setAuthRecoverySuccess(`Linked Auth UID ${res.authUid} to existing student ${targetDbId}.`);
+      await retryConnection();
+    } catch (err: any) {
+      setFormError(err?.message || 'Failed linking Auth UID to student.');
+    } finally {
+      setIsLinkingAuth(false);
+    }
+  };
+
+  const handleProvisionAuthForExisting = async () => {
+    if (!editingStudent || authRecoveryPassword.trim().length < 6) {
+      setFormError('Password must be at least 6 characters to provision a login for this student.');
+      return;
+    }
+    const targetDbId = editingStudent.studentDbId || editingStudent.uid;
+    setIsLinkingAuth(true);
+    setFormError(null);
+    setAuthRecoverySuccess(null);
+    try {
+      const res = await provisionAuthForExistingStudent(
+        targetDbId,
+        authRecoveryPassword.trim(),
+        formData.email?.trim() || undefined
+      );
+      setEditingStudent({ ...editingStudent, authUid: res.authUid, email: res.email });
+      setFormData((prev) => ({ ...prev, email: res.email }));
+      setAuthRecoveryPassword('');
+      setAuthRecoverySuccess(`Provisioned login (${res.email}) & linked Auth UID ${res.authUid}.`);
+      await retryConnection();
+    } catch (err: any) {
+      setFormError(err?.message || 'Failed provisioning Firebase Auth login.');
+    } finally {
+      setIsLinkingAuth(false);
+    }
   };
 
   const handleSaveStudent = async (e: React.FormEvent) => {
@@ -140,8 +195,13 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
       return;
     }
 
-    // Check duplicate UID when adding new student
-    if (!editingStudent && studentsList.some((s) => s.uid.toUpperCase() === uid)) {
+    // Check duplicate RFID UID against other students
+    const currentEditKey = editingStudent?.studentDbId || editingStudent?.uid;
+    if (
+      studentsList.some(
+        (s) => (s.studentDbId || s.uid) !== currentEditKey && s.uid.toUpperCase() === uid
+      )
+    ) {
       setFormError(`A student is already registered with RFID UID: ${uid}`);
       return;
     }
@@ -181,7 +241,9 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
     }
 
     const studentToSave: Student = {
+      studentDbId: editingStudent?.studentDbId,
       uid,
+      rfidUID: uid,
       name,
       studentId,
       department: formData.department || 'General',
@@ -207,8 +269,13 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
 
   const handleConfirmDelete = async () => {
     if (studentToDelete) {
-      await deleteStudent(studentToDelete.uid);
-      setStudentToDelete(null);
+      try {
+        await deleteStudent(studentToDelete.studentDbId || studentToDelete.uid);
+        setStudentToDelete(null);
+      } catch (err: any) {
+        setFormError(err?.message || 'Failed to delete student from Firebase.');
+        setStudentToDelete(null);
+      }
     }
   };
 
@@ -234,15 +301,6 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
         </div>
 
         <div className="flex items-center gap-2.5">
-          <button
-            onClick={() => seedDefaultStudents()}
-            className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold border border-slate-700 transition flex items-center gap-1.5"
-            title="Restore default 3 students: Mohammed Rehan, Shakir Ahmed, Mohammed Zaheer"
-          >
-            <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-            <span>Seed 3 Default Students</span>
-          </button>
-
           <button
             onClick={handleOpenAdd}
             className="px-4 py-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-bold shadow-lg shadow-blue-500/20 border border-blue-400/30 transition flex items-center gap-1.5 cursor-pointer"
@@ -311,14 +369,15 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
                 </tr>
               ) : (
                 filteredStudents.map((st) => {
-                  const todayRecord = todayAttendance[st.uid];
+                  const dbKey = st.studentDbId || st.uid;
+                  const todayRecord = todayAttendance[dbKey] || todayAttendance[st.uid];
                   const isPresent = Boolean(todayRecord && !todayRecord.isDeleted && todayRecord.status === 'Present');
                   const isAbsentMarked = Boolean(todayRecord && !todayRecord.isDeleted && todayRecord.status === 'Absent');
                   const isSuspended = st.status === 'suspended' || Boolean(st.isSuspended);
 
                   return (
                     <tr 
-                      key={st.uid}
+                      key={dbKey}
                       className={`hover:bg-slate-850/50 transition group ${isSuspended ? 'bg-amber-950/15' : ''}`}
                     >
                       {/* Name & ID */}
@@ -343,9 +402,28 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
                                 </span>
                               )}
                             </div>
-                            <p className="text-[11px] font-mono text-slate-400">
-                              {st.studentId}
-                            </p>
+                            <div className="flex flex-wrap items-center gap-2 mt-0.5">
+                              <p className="text-[11px] font-mono text-slate-400">
+                                {st.studentId}
+                              </p>
+                              {st.authUid ? (
+                                <span
+                                  title={`Auth UID: ${st.authUid}`}
+                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 font-mono text-[9px]"
+                                >
+                                  <UserCheck className="w-2.5 h-2.5" />
+                                  <span>Auth Linked</span>
+                                </span>
+                              ) : (
+                                <span
+                                  title="No Firebase Auth UID linked yet"
+                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/20 text-amber-300 font-mono text-[9px]"
+                                >
+                                  <Link2 className="w-2.5 h-2.5" />
+                                  <span>Unlinked</span>
+                                </span>
+                              )}
+                            </div>
                           </div>
                         </div>
                       </td>
@@ -516,7 +594,7 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
                   <input
                     type="text"
                     required
-                    placeholder="e.g. 5AA5AB24"
+                    placeholder="e.g. A1B2C3D4"
                     value={formData.uid}
                     onChange={(e) => setFormData({ ...formData, uid: e.target.value.toUpperCase() })}
                     className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-cyan-300 font-mono text-xs focus:outline-none focus:border-blue-500 uppercase"
@@ -538,7 +616,7 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
                 <input
                   type="text"
                   required
-                  placeholder="e.g. Mohammed Rehan"
+                  placeholder="Full Student Name"
                   value={formData.name}
                   onChange={(e) => setFormData({ ...formData, name: e.target.value })}
                   className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-blue-500"
@@ -642,6 +720,73 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
                   />
                 </div>
               </div>
+
+              {/* Existing Student Auth Mapping & Account Recovery (when editing) */}
+              {editingStudent && (
+                <div className="p-3.5 rounded-2xl bg-slate-900/90 border border-slate-800 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono">
+                    <span className="text-slate-400">
+                      DB Key: <strong className="text-cyan-300">{editingStudent.studentDbId || editingStudent.uid}</strong>
+                    </span>
+                    <span className={editingStudent.authUid ? 'text-emerald-400' : 'text-amber-300'}>
+                      Auth UID: <strong>{editingStudent.authUid || 'Not linked yet'}</strong>
+                    </span>
+                  </div>
+
+                  {authRecoverySuccess && (
+                    <div className="p-2.5 rounded-xl bg-emerald-950/40 border border-emerald-500/40 text-emerald-300 text-[11px] flex items-center gap-2">
+                      <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                      <span>{authRecoverySuccess}</span>
+                    </div>
+                  )}
+
+                  {!editingStudent.authUid && (
+                    <div className="space-y-2.5 pt-1 border-t border-slate-800">
+                      <p className="text-[11px] text-slate-300 leading-relaxed">
+                        Link an existing Firebase Auth UID or create a new portal login for this student without overwriting their RFID card or attendance history.
+                      </p>
+
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <input
+                          type="text"
+                          placeholder="Paste existing Firebase Auth UID..."
+                          value={authRecoveryUid}
+                          onChange={(e) => setAuthRecoveryUid(e.target.value)}
+                          className="flex-1 px-3 py-1.5 rounded-xl bg-slate-950 border border-slate-700 text-cyan-300 font-mono text-xs focus:outline-none focus:border-cyan-500"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleLinkExistingAuthUid}
+                          disabled={isLinkingAuth || !authRecoveryUid.trim()}
+                          className="px-3 py-1.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold transition flex items-center justify-center gap-1 cursor-pointer disabled:opacity-40 shrink-0"
+                        >
+                          <Link2 className="w-3.5 h-3.5" />
+                          <span>Link UID</span>
+                        </button>
+                      </div>
+
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <input
+                          type="password"
+                          placeholder="Or set new password (min 6 chars)..."
+                          value={authRecoveryPassword}
+                          onChange={(e) => setAuthRecoveryPassword(e.target.value)}
+                          className="flex-1 px-3 py-1.5 rounded-xl bg-slate-950 border border-slate-700 text-white text-xs focus:outline-none focus:border-emerald-500"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleProvisionAuthForExisting}
+                          disabled={isLinkingAuth || authRecoveryPassword.trim().length < 6}
+                          className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition flex items-center justify-center gap-1 cursor-pointer disabled:opacity-40 shrink-0"
+                        >
+                          <UserCheck className="w-3.5 h-3.5" />
+                          <span>Create Login</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Create Firebase Auth Portal Account Option (for new students) */}
               {!editingStudent && (

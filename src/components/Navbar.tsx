@@ -26,7 +26,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenScanner,
   onNavigate,
 }) => {
-  const { isDbConnected, dbErrorMessage } = useAttendance();
+  const { isDbConnected, dbErrorMessage, dbDiagnostic } = useAttendance();
   const [time, setTime] = useState<string>('');
   const [dateStr, setDateStr] = useState<string>('');
 
@@ -97,7 +97,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           type="button"
           onClick={() => onNavigate('settings')}
           className="cursor-pointer flex items-center gap-1.5 sm:gap-2 px-2.5 sm:px-3 py-1.5 rounded-lg bg-slate-900/90 border border-slate-800 hover:border-slate-700 transition"
-          title="Firebase Realtime Database: rfid-attendance-system-5fccd"
+          title={dbDiagnostic?.message || 'Firebase Realtime Database: rfid-attendance-system-5fccd'}
         >
           <div className="relative flex items-center justify-center">
             {dbErrorMessage ? (
@@ -120,7 +120,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                   ? 'text-emerald-400' 
                   : 'text-amber-400'
             }>
-              {dbErrorMessage ? 'ERR' : isDbConnected ? 'LIVE' : 'SYNC'}
+              {dbErrorMessage ? dbDiagnostic.label : isDbConnected ? 'LIVE' : 'SYNC'}
             </span>
           </span>
         </button>

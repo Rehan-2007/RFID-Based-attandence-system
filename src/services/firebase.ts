@@ -61,7 +61,12 @@ import {
   MigrationResult,
   MigrationRecordLog,
   AttendanceSettings,
-  UnregisteredAttendanceGroup
+  UnregisteredAttendanceGroup,
+  DbDiagnosticCode,
+  DbDiagnosticState,
+  DatabaseValidationReport,
+  DatabaseDiagnosticIssue,
+  UnlinkedUserProfileEntry
 } from '../types';
 import {
   getISTDateStr,
@@ -146,125 +151,257 @@ export const DEFAULT_FIREBASE_CONFIG: FirebaseConfigState = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID || '',
 };
 
-export const INITIAL_STUDENTS: Student[] = [
-  {
-    uid: '5AA5AB24',
-    name: 'Mohammed Rehan',
-    studentId: 'STU-2024-001',
-    department: 'Computer Science & Engineering',
-    year: 'Final Year',
-    semester: 'Semester 8',
-    email: 'techbyrehan123@gmail.com',
-    phone: '+91 98765 43210',
-    registeredAt: '2026-01-15T09:00:00Z',
-    status: 'active',
-  },
-  {
-    uid: '0A37B224',
-    name: 'Shakir Ahmed',
-    studentId: 'STU-2024-002',
-    department: 'Electronics & Communication',
-    year: '3rd Year',
-    semester: 'Semester 6',
-    email: 'shakir@gmail.com',
-    phone: '+91 98450 12345',
-    registeredAt: '2026-01-15T09:15:00Z',
-    status: 'active',
-    authUid: 'rUyNTxxi8tYnv3314Jc9poaiKHA3',
-  },
-  {
-    uid: '8A75B525',
-    name: 'Mohammed Zaheer',
-    studentId: 'STU-2024-003',
-    department: 'Information Technology',
-    year: 'Final Year',
-    semester: 'Semester 8',
-    email: 'zaheer@gmail.com',
-    phone: '+91 97400 98765',
-    registeredAt: '2026-01-15T09:30:00Z',
-    status: 'active',
-    authUid: 'K0umaWs1dbMWbOsCuWzC5pH7BGe2',
-  },
-];
+// In-memory cache of students fetched dynamically from Firebase RTDB (/students/{studentDbId})
+export const cachedStudentsMap: Record<string, Student> = {};
 
 /**
- * Known existing Firebase Authentication Student Accounts to link to Firestore
+ * Typed Firebase Auth/Profile diagnostic error so UI distinguishes:
+ * - auth_expired
+ * - permission_denied
+ * - not_registered
+ * - mapping_missing
+ * - disconnected
  */
-export const KNOWN_STUDENT_AUTH_ACCOUNTS: Record<string, {
-  uid: string;
-  email: string;
-  role: UserRole;
-  name: string;
-  rollNumber: string;
-  rfidUID: string;
-  department: string;
-  year: string;
-  semester: string;
-  phone: string;
-}> = {
-  // STUDENT 1: Zaheer
-  'K0umaWs1dbMWbOsCuWzC5pH7BGe2': {
-    uid: 'K0umaWs1dbMWbOsCuWzC5pH7BGe2',
-    email: 'zaheer@gmail.com',
-    role: 'student',
-    name: 'Mohammed Zaheer',
-    rollNumber: 'STU-2024-003',
-    rfidUID: '8A75B525',
-    department: 'Information Technology',
-    year: 'Final Year',
-    semester: 'Semester 8',
-    phone: '+91 97400 98765',
-  },
-  // STUDENT 2: Shakir
-  'rUyNTxxi8tYnv3314Jc9poaiKHA3': {
-    uid: 'rUyNTxxi8tYnv3314Jc9poaiKHA3',
-    email: 'shakir@gmail.com',
-    role: 'student',
-    name: 'Shakir Ahmed',
-    rollNumber: 'STU-2024-002',
-    rfidUID: '0A37B224',
-    department: 'Electronics & Communication',
-    year: '3rd Year',
-    semester: 'Semester 6',
-    phone: '+91 98450 12345',
-  },
-  // STUDENT 3: Mohammed Rehan
-  'bi3c890VUXhVE0JFxroYfnlQwea2': {
-    uid: 'bi3c890VUXhVE0JFxroYfnlQwea2',
-    email: 'techbyrehan123@gmail.com',
-    role: 'admin',
-    name: 'Mohammed Rehan',
-    rollNumber: 'STU-2024-001',
-    rfidUID: '5AA5AB24',
-    department: 'Computer Science & Engineering',
-    year: 'Final Year',
-    semester: 'Semester 8',
-    phone: '+91 98765 43210',
-  },
-};
+export class AuthProfileError extends Error {
+  code: DbDiagnosticCode;
+  path?: string;
+  operation?: string;
 
-export const KNOWN_STUDENTS_BY_EMAIL: Record<string, typeof KNOWN_STUDENT_AUTH_ACCOUNTS[string]> = {
-  'zaheer@gmail.com': KNOWN_STUDENT_AUTH_ACCOUNTS['K0umaWs1dbMWbOsCuWzC5pH7BGe2'],
-  'zaheer.m@example.com': KNOWN_STUDENT_AUTH_ACCOUNTS['K0umaWs1dbMWbOsCuWzC5pH7BGe2'],
-  'shakir@gmail.com': KNOWN_STUDENT_AUTH_ACCOUNTS['rUyNTxxi8tYnv3314Jc9poaiKHA3'],
-  'shakir.ahmed@example.com': KNOWN_STUDENT_AUTH_ACCOUNTS['rUyNTxxi8tYnv3314Jc9poaiKHA3'],
-  'techbyrehan123@gmail.com': KNOWN_STUDENT_AUTH_ACCOUNTS['bi3c890VUXhVE0JFxroYfnlQwea2'],
-};
+  constructor(code: DbDiagnosticCode, message: string, path?: string, operation?: string) {
+    super(message);
+    this.name = 'AuthProfileError';
+    this.code = code;
+    this.path = path;
+    this.operation = operation;
+  }
+}
 
-// In-memory cache of students fetched from RTDB or Firestore
-export const cachedStudentsMap: Record<string, Student> = {};
+export function classifyFirebaseError(
+  err: any,
+  fallbackMessage?: string
+): DbDiagnosticState {
+  const rawCode = String(err?.code || '').toLowerCase();
+  const rawMsg = String(err?.message || fallbackMessage || '');
+  const lowerMsg = rawMsg.toLowerCase();
+
+  if (
+    rawCode === 'auth_expired' ||
+    rawCode.includes('id-token-expired') ||
+    rawCode.includes('user-token-expired') ||
+    rawCode.includes('invalid-user-token') ||
+    rawCode.includes('unauthenticated') ||
+    /token.*expired|session.*expired|auth.*expired|not authenticated|unauthenticated/i.test(lowerMsg)
+  ) {
+    return {
+      code: 'auth_expired',
+      label: 'AUTH EXPIRED',
+      message: rawMsg || 'Your Firebase Authentication session has expired. Please sign in again.',
+      path: err?.path,
+      operation: err?.operation,
+    };
+  }
+
+  if (
+    rawCode === 'permission_denied' ||
+    rawCode.includes('permission-denied') ||
+    rawCode.includes('permission_denied') ||
+    /permission_denied|permission denied|insufficient permissions|unauthorized_uid/i.test(lowerMsg)
+  ) {
+    return {
+      code: 'permission_denied',
+      label: 'PERM DENIED',
+      message: rawMsg || 'Permission denied accessing Firebase Realtime Database.',
+      path: err?.path,
+      operation: err?.operation,
+    };
+  }
+
+  if (
+    rawCode === 'not_registered' ||
+    /not registered|no registered profile|profile has not been configured/i.test(lowerMsg)
+  ) {
+    return {
+      code: 'not_registered',
+      label: 'UNREGISTERED',
+      message: rawMsg || 'Student account is authenticated but not registered in the database.',
+      path: err?.path,
+      operation: err?.operation,
+    };
+  }
+
+  if (
+    rawCode === 'mapping_missing' ||
+    /mapping missing|missing student|unable to resolve|rfid.*not.*linked/i.test(lowerMsg)
+  ) {
+    return {
+      code: 'mapping_missing',
+      label: 'UNMAPPED',
+      message: rawMsg || 'Student mapping missing between Auth UID, Student DB ID, and RFID Card.',
+      path: err?.path,
+      operation: err?.operation,
+    };
+  }
+
+  if (
+    rawCode === 'disconnected' ||
+    rawCode.includes('network') ||
+    /offline|disconnected|network|timed out/i.test(lowerMsg)
+  ) {
+    return {
+      code: 'disconnected',
+      label: 'OFFLINE',
+      message: rawMsg || 'Firebase Realtime Database is disconnected.',
+      path: err?.path,
+      operation: err?.operation,
+    };
+  }
+
+  return {
+    code: 'disconnected',
+    label: 'SYNC ERR',
+    message: rawMsg || 'Unable to synchronize with Firebase Realtime Database.',
+    path: err?.path,
+    operation: err?.operation,
+  };
+}
+
+export function generateStudentDbId(rollNumber?: string): string {
+  const cleanRoll = (rollNumber || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_-]/g, '');
+  const rand = Math.random().toString(36).substring(2, 6).toUpperCase();
+  const ts = Date.now().toString(36).toUpperCase().slice(-5);
+  return cleanRoll ? `STU_${cleanRoll}_${rand}` : `STU_${ts}_${rand}`;
+}
+
+export function resolveStudentDbIdFromMap(
+  identifier: string,
+  studentsMap: Record<string, Student> = cachedStudentsMap
+): string | null {
+  if (!identifier) return null;
+  const raw = identifier.trim();
+  if (!raw) return null;
+  const upper = raw.toUpperCase();
+  const lower = raw.toLowerCase();
+
+  if (studentsMap[raw]) return raw;
+  if (studentsMap[upper]) return upper;
+
+  for (const [dbKey, st] of Object.entries(studentsMap)) {
+    if (!st) continue;
+    const stDbId = (st.studentDbId || dbKey).trim();
+    const stRfid = (st.rfidUID || st.uid || '').trim().toUpperCase();
+    const stRoll = (st.studentId || '').trim().toUpperCase();
+    const stEmail = (st.email || '').trim().toLowerCase();
+    if (
+      stDbId === raw ||
+      stDbId.toUpperCase() === upper ||
+      (stRfid && stRfid === upper) ||
+      (stRoll && stRoll === upper) ||
+      (st.authUid && st.authUid === raw) ||
+      (stEmail && stEmail === lower)
+    ) {
+      return dbKey;
+    }
+  }
+  return null;
+}
+
+export async function resolveStudentByAnyId(
+  idOrRfid: string,
+  studentsLookup?: Record<string, Student>
+): Promise<{ studentDbId: string; student: Student; rfidUID: string } | null> {
+  const raw = (idOrRfid || '').trim();
+  if (!raw) return null;
+  const upper = raw.toUpperCase();
+  const db = getFirebaseDatabase();
+
+  // 1. Check direct lookup in /students/{raw} or /students/{upper}
+  for (const candidate of Array.from(new Set([raw, upper]))) {
+    try {
+      const directSnap = await withTimeout(get(ref(db, `students/${candidate}`)), 3000, null);
+      if (directSnap && directSnap.exists && directSnap.exists()) {
+        const st = directSnap.val() as Student;
+        const rfidUID = (st.rfidUID || st.uid || candidate).trim().toUpperCase();
+        return {
+          studentDbId: candidate,
+          student: { ...st, studentDbId: candidate, rfidUID, uid: rfidUID },
+          rfidUID,
+        };
+      }
+    } catch {}
+  }
+
+  // 2. Query /rfid_to_student/{upper}
+  try {
+    const idxSnap = await withTimeout(get(ref(db, `rfid_to_student/${upper}`)), 3000, null);
+    if (idxSnap && idxSnap.exists && idxSnap.exists()) {
+      const mapping = idxSnap.val();
+      const targetDbId = typeof mapping === 'string' ? mapping : mapping?.studentDbId;
+      if (targetDbId) {
+        const stSnap = await withTimeout(get(ref(db, `students/${targetDbId}`)), 3000, null);
+        if (stSnap && stSnap.exists && stSnap.exists()) {
+          const st = stSnap.val() as Student;
+          const rfidUID = (st.rfidUID || st.uid || upper).trim().toUpperCase();
+          return {
+            studentDbId: targetDbId,
+            student: { ...st, studentDbId: targetDbId, rfidUID, uid: rfidUID },
+            rfidUID,
+          };
+        }
+      }
+    }
+  } catch {}
+
+  // 3. Fallback scan cached / lookup / live /students (for Admin operations)
+  const sources = [studentsLookup, cachedStudentsMap].filter(Boolean) as Record<string, Student>[];
+  for (const map of sources) {
+    const matchedKey = resolveStudentDbIdFromMap(raw, map);
+    if (matchedKey && map[matchedKey]) {
+      const st = map[matchedKey];
+      const rfidUID = (st.rfidUID || st.uid || matchedKey).trim().toUpperCase();
+      return {
+        studentDbId: matchedKey,
+        student: { ...st, studentDbId: matchedKey, rfidUID, uid: rfidUID },
+        rfidUID,
+      };
+    }
+  }
+
+  try {
+    const allSnap = await withTimeout(get(ref(db, 'students')), 3500, null);
+    if (allSnap && allSnap.exists && allSnap.exists()) {
+      const allMap = allSnap.val() as Record<string, Student>;
+      const matchedKey = resolveStudentDbIdFromMap(raw, allMap);
+      if (matchedKey && allMap[matchedKey]) {
+        const st = allMap[matchedKey];
+        const rfidUID = (st.rfidUID || st.uid || matchedKey).trim().toUpperCase();
+        return {
+          studentDbId: matchedKey,
+          student: { ...st, studentDbId: matchedKey, rfidUID, uid: rfidUID },
+          rfidUID,
+        };
+      }
+    }
+  } catch {}
+
+  return null;
+}
 
 
 export function getActiveFirebaseConfig(): FirebaseConfigState {
   try {
-    const stored = localStorage.getItem(STORAGE_KEY_FIREBASE_CONFIG);
-    if (stored) {
-      const parsed = JSON.parse(stored);
-      // Ensure apiKey is never empty or placeholder
-      if (!parsed.apiKey || parsed.apiKey === 'AIzaSyPlaceholderClientInitialKey00') {
-        parsed.apiKey = DEFAULT_FIREBASE_CONFIG.apiKey;
+    if (typeof localStorage !== 'undefined') {
+      const stored = localStorage.getItem(STORAGE_KEY_FIREBASE_CONFIG);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        // Ensure apiKey is never empty or placeholder
+        if (!parsed.apiKey || parsed.apiKey === 'AIzaSyPlaceholderClientInitialKey00') {
+          parsed.apiKey = DEFAULT_FIREBASE_CONFIG.apiKey;
+        }
+        return { ...DEFAULT_FIREBASE_CONFIG, ...parsed };
       }
-      return { ...DEFAULT_FIREBASE_CONFIG, ...parsed };
     }
   } catch (e) {
     console.warn('Failed reading stored Firebase config', e);
@@ -280,7 +417,9 @@ export function resetFirebaseInstances() {
 }
 
 export function saveActiveFirebaseConfig(config: FirebaseConfigState) {
-  localStorage.setItem(STORAGE_KEY_FIREBASE_CONFIG, JSON.stringify(config));
+  if (typeof localStorage !== 'undefined') {
+    localStorage.setItem(STORAGE_KEY_FIREBASE_CONFIG, JSON.stringify(config));
+  }
   resetFirebaseInstances();
 }
 
@@ -364,18 +503,23 @@ export function subscribeToStudents(
       studentsRef,
       (snapshot: DataSnapshot) => {
         const val = snapshot.val();
+        Object.keys(cachedStudentsMap).forEach((k) => delete cachedStudentsMap[k]);
         if (val && typeof val === 'object') {
-          Object.keys(val).forEach((k) => {
-            const st = val[k];
-            if (st) {
-              const cardUid = (st.uid || k).toString().trim().toUpperCase();
-              cachedStudentsMap[cardUid] = {
-                ...st,
-                uid: cardUid,
-              };
-            }
+          const normalized: Record<string, Student> = {};
+          Object.entries(val).forEach(([dbKey, rawSt]: [string, any]) => {
+            if (!rawSt || typeof rawSt !== 'object') return;
+            const studentDbId = (rawSt.studentDbId || dbKey).toString().trim();
+            const rfidUID = (rawSt.rfidUID || rawSt.uid || dbKey).toString().trim().toUpperCase();
+            const normStudent: Student = {
+              ...rawSt,
+              studentDbId: dbKey,
+              rfidUID,
+              uid: rfidUID,
+            };
+            cachedStudentsMap[dbKey] = normStudent;
+            normalized[dbKey] = normStudent;
           });
-          onSuccess(val);
+          onSuccess(normalized);
         } else {
           onSuccess({});
         }
@@ -393,54 +537,168 @@ export function subscribeToStudents(
   }
 }
 
-export async function saveStudent(student: Student): Promise<void> {
+export async function saveStudent(student: Student): Promise<Student> {
   const db = getFirebaseDatabase();
-  const cardUid = student.uid.trim().toUpperCase();
-  const studentRef = ref(db, `students/${cardUid}`);
+  const fs = getFirebaseFirestore();
+  const newRfid = (student.rfidUID || student.uid || '').trim().toUpperCase();
+  if (!newRfid) {
+    throw new Error('RFID Card UID is required.');
+  }
 
-  // Check if student already exists so profile edits use update() without wiping concurrent nested attendance
+  let studentDbId = (student.studentDbId || '').trim();
+  let previousRfid = '';
   let exists = false;
   let existingAttendance: Record<string, AttendanceRecord> | undefined = undefined;
+  let existingData: Student | null = null;
+
+  // Locate existing student record by studentDbId first, or by matching existing RFID
+  if (!studentDbId) {
+    const matched = resolveStudentDbIdFromMap(newRfid);
+    if (matched) studentDbId = matched;
+  }
+
+  if (studentDbId) {
+    try {
+      const snap = await withTimeout(get(ref(db, `students/${studentDbId}`)), 3000, null);
+      if (snap && snap.exists && snap.exists()) {
+        exists = true;
+        existingData = snap.val() as Student;
+        previousRfid = (existingData?.rfidUID || existingData?.uid || studentDbId).trim().toUpperCase();
+        if (existingData?.attendance) {
+          existingAttendance = existingData.attendance;
+        }
+      }
+    } catch {}
+  } else {
+    studentDbId = generateStudentDbId(student.studentId);
+  }
+
+  // Enforce: Prevent duplicate active RFID card assignments across different students
   try {
-    const snap = await withTimeout(get(studentRef), 3000, null);
-    if (snap && snap.exists && snap.exists()) {
-      exists = true;
-      const current = snap.val();
-      if (current?.attendance) {
-        existingAttendance = current.attendance;
+    const idxSnap = await withTimeout(get(ref(db, `rfid_to_student/${newRfid}`)), 3000, null);
+    if (idxSnap && idxSnap.exists && idxSnap.exists()) {
+      const idxVal = idxSnap.val();
+      const assignedDbId = typeof idxVal === 'string' ? idxVal : idxVal?.studentDbId;
+      const isActiveIdx = typeof idxVal === 'string' ? true : idxVal?.active !== false;
+      if (assignedDbId && assignedDbId !== studentDbId && isActiveIdx) {
+        throw new Error(`RFID card ${newRfid} is already assigned to another student (${assignedDbId}). Unassign it before reassigning.`);
       }
     }
-  } catch {}
+  } catch (dupErr: any) {
+    if (dupErr?.message?.includes('already assigned')) throw dupErr;
+  }
+
+  try {
+    const allSnap = await withTimeout(get(ref(db, 'students')), 3000, null);
+    if (allSnap && allSnap.exists && allSnap.exists()) {
+      const all = allSnap.val() as Record<string, Student>;
+      for (const [k, other] of Object.entries(all)) {
+        if (!other || k === studentDbId) continue;
+        const otherRfid = (other.rfidUID || other.uid || k).trim().toUpperCase();
+        if (otherRfid === newRfid && other.status !== 'inactive') {
+          throw new Error(`RFID card ${newRfid} is already assigned to active student ${other.name} (${other.studentId}).`);
+        }
+      }
+    }
+  } catch (dupErr: any) {
+    if (dupErr?.message?.includes('already assigned')) throw dupErr;
+  }
+
+  const studentRef = ref(db, `students/${studentDbId}`);
+  const mergedStudent: Student = {
+    ...student,
+    studentDbId,
+    rfidUID: newRfid,
+    uid: newRfid,
+    authUid: student.authUid || existingData?.authUid || undefined,
+  };
 
   if (exists && !student.attendance) {
-    const { attendance: _ignored, ...profileOnly } = student;
-    await update(
-      studentRef,
-      stripUndefinedDeep({
-        ...profileOnly,
-        uid: cardUid,
-      })
+    const { attendance: _ignored, ...profileOnly } = mergedStudent;
+    await runRtdbOp('UPDATE', `/students/${studentDbId}`, () =>
+      update(studentRef, stripUndefinedDeep(profileOnly))
     );
-    return;
+  } else {
+    const payload: any = { ...mergedStudent };
+    if (student.attendance) {
+      payload.attendance = { ...(existingAttendance || {}), ...student.attendance };
+    } else if (existingAttendance) {
+      payload.attendance = existingAttendance;
+    }
+    await runRtdbOp('SET', `/students/${studentDbId}`, () => set(studentRef, stripUndefinedDeep(payload)));
   }
 
-  const payload: any = {
-    ...student,
-    uid: cardUid,
-  };
-  if (student.attendance) {
-    payload.attendance = { ...(existingAttendance || {}), ...student.attendance };
-  } else if (existingAttendance) {
-    payload.attendance = existingAttendance;
+  // Remove stale RFID index if card was reassigned
+  if (previousRfid && previousRfid !== newRfid) {
+    try { await remove(ref(db, `rfid_to_student/${previousRfid}`)); } catch {}
+    try { await remove(ref(db, `rfid_to_uid/${previousRfid}`)); } catch {}
   }
 
-  await set(studentRef, stripUndefinedDeep(payload));
+  // Maintain authoritative /rfid_to_student/{RFID} mapping
+  await set(
+    ref(db, `rfid_to_student/${newRfid}`),
+    stripUndefinedDeep({
+      rfidUID: newRfid,
+      studentDbId,
+      authUid: mergedStudent.authUid || '',
+      rollNumber: mergedStudent.studentId,
+      active: mergedStudent.status !== 'inactive',
+      updatedAt: Date.now(),
+    })
+  );
+
+  if (mergedStudent.authUid) {
+    try { await set(ref(db, `rfid_to_uid/${newRfid}`), mergedStudent.authUid); } catch {}
+    const userPayload: UserProfile = stripUndefinedDeep({
+      uid: mergedStudent.authUid,
+      studentDbId,
+      name: mergedStudent.name,
+      email: (mergedStudent.email || '').trim().toLowerCase(),
+      rollNumber: mergedStudent.studentId,
+      department: mergedStudent.department,
+      year: mergedStudent.year,
+      semester: mergedStudent.semester || 'Semester 1',
+      role: 'student',
+      rfidUID: newRfid,
+      phone: mergedStudent.phone || '',
+      createdAt: Date.now(),
+    });
+    try {
+      await set(ref(db, `users/${mergedStudent.authUid}`), userPayload);
+      await set(
+        ref(db, `auth_to_student/${mergedStudent.authUid}`),
+        stripUndefinedDeep({
+          authUid: mergedStudent.authUid,
+          studentDbId,
+          rfidUID: newRfid,
+          rollNumber: mergedStudent.studentId,
+          email: userPayload.email,
+          updatedAt: Date.now(),
+        })
+      );
+      await withTimeout(setDoc(doc(fs, 'users', mergedStudent.authUid), userPayload, { merge: true }), 2000, null);
+    } catch {}
+  }
+
+  return mergedStudent;
 }
 
-export async function deleteStudent(uid: string): Promise<void> {
+export async function deleteStudent(idOrUid: string): Promise<void> {
   const db = getFirebaseDatabase();
-  const studentRef = ref(db, `students/${uid.toUpperCase()}`);
-  await remove(studentRef);
+  const resolved = await resolveStudentByAnyId(idOrUid);
+  const targetDbId = resolved?.studentDbId || idOrUid.trim();
+  const rfidToClean = resolved?.rfidUID || (resolved?.student?.rfidUID || resolved?.student?.uid || '').trim().toUpperCase();
+  const authUidToClean = resolved?.student?.authUid;
+
+  await runRtdbOp('REMOVE', `/students/${targetDbId}`, () => remove(ref(db, `students/${targetDbId}`)));
+
+  if (rfidToClean) {
+    try { await remove(ref(db, `rfid_to_student/${rfidToClean}`)); } catch {}
+    try { await remove(ref(db, `rfid_to_uid/${rfidToClean}`)); } catch {}
+  }
+  if (authUidToClean) {
+    try { await remove(ref(db, `auth_to_student/${authUidToClean}`)); } catch {}
+  }
 }
 
 // Unified Attendance & Working Days Realtime Database Operations
@@ -452,11 +710,13 @@ export function subscribeToAttendanceSettings(
 ) {
   let localFallback: AttendanceSettings = { deadlineTime: DEFAULT_ATTENDANCE_DEADLINE };
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_ATTENDANCE_SETTINGS);
-    if (raw) {
-      const parsed = JSON.parse(raw) as AttendanceSettings;
-      if (isValidDeadlineHHMM(parsed?.deadlineTime)) {
-        localFallback = parsed;
+    if (typeof localStorage !== 'undefined') {
+      const raw = localStorage.getItem(STORAGE_KEY_ATTENDANCE_SETTINGS);
+      if (raw) {
+        const parsed = JSON.parse(raw) as AttendanceSettings;
+        if (isValidDeadlineHHMM(parsed?.deadlineTime)) {
+          localFallback = parsed;
+        }
       }
     }
   } catch {}
@@ -471,7 +731,9 @@ export function subscribeToAttendanceSettings(
           const val = snapshot.val() as AttendanceSettings;
           if (val && isValidDeadlineHHMM(val.deadlineTime)) {
             try {
-              localStorage.setItem(STORAGE_KEY_ATTENDANCE_SETTINGS, JSON.stringify(val));
+              if (typeof localStorage !== 'undefined') {
+                localStorage.setItem(STORAGE_KEY_ATTENDANCE_SETTINGS, JSON.stringify(val));
+              }
             } catch {}
             onSuccess(val);
             return;
@@ -508,11 +770,13 @@ export async function saveAttendanceSettings(
   });
 
   try {
-    localStorage.setItem(STORAGE_KEY_ATTENDANCE_SETTINGS, JSON.stringify(payload));
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(STORAGE_KEY_ATTENDANCE_SETTINGS, JSON.stringify(payload));
+    }
   } catch {}
 
   const db = getFirebaseDatabase();
-  await set(ref(db, 'settings/attendance'), payload);
+  await runRtdbOp('SET', '/settings/attendance', () => set(ref(db, 'settings/attendance'), payload));
   return payload;
 }
 
@@ -634,21 +898,24 @@ export function subscribeToDateAttendance(
   return subscribeToStudents(
     (studentsMap) => {
       const result: Record<string, AttendanceRecord> = {};
-      Object.entries(studentsMap || {}).forEach(([rfidKey, st]) => {
+      Object.entries(studentsMap || {}).forEach(([dbKey, st]) => {
         if (!st || !st.attendance) return;
-        const cardUid = (st.uid || rfidKey).trim().toUpperCase();
+        const studentDbId = (st.studentDbId || dbKey).trim();
+        const cardUid = (st.rfidUID || st.uid || dbKey).trim().toUpperCase();
         const rawRec = st.attendance[dateStr];
         if (rawRec && !rawRec.isDeleted) {
-          result[cardUid] = normalizeAttendanceRecord(
+          result[studentDbId] = normalizeAttendanceRecord(
             {
               ...rawRec,
+              studentDbId,
               studentName: rawRec.studentName || st.name,
               studentId: rawRec.studentId || st.studentId,
               department: rawRec.department || st.department,
               authUid: rawRec.authUid || st.authUid,
             },
             dateStr,
-            cardUid
+            cardUid,
+            studentDbId
           );
         }
       });
@@ -665,24 +932,27 @@ export function subscribeToAllAttendance(
   return subscribeToStudents(
     (studentsMap) => {
       const recordsByDate: Record<string, Record<string, AttendanceRecord>> = {};
-      Object.entries(studentsMap || {}).forEach(([rfidKey, st]) => {
+      Object.entries(studentsMap || {}).forEach(([dbKey, st]) => {
         if (!st || !st.attendance) return;
-        const cardUid = (st.uid || rfidKey).trim().toUpperCase();
+        const studentDbId = (st.studentDbId || dbKey).trim();
+        const cardUid = (st.rfidUID || st.uid || dbKey).trim().toUpperCase();
         Object.entries(st.attendance).forEach(([dateKey, rawRec]) => {
           if (!rawRec) return;
           if (!recordsByDate[dateKey]) {
             recordsByDate[dateKey] = {};
           }
-          recordsByDate[dateKey][cardUid] = normalizeAttendanceRecord(
+          recordsByDate[dateKey][studentDbId] = normalizeAttendanceRecord(
             {
               ...rawRec,
+              studentDbId,
               studentName: rawRec.studentName || st.name,
               studentId: rawRec.studentId || st.studentId,
               department: rawRec.department || st.department,
               authUid: rawRec.authUid || st.authUid,
             },
             dateKey,
-            cardUid
+            cardUid,
+            studentDbId
           );
         });
       });
@@ -693,13 +963,14 @@ export function subscribeToAllAttendance(
 }
 
 /**
- * Record attendance from ESP32 or portal directly into students/{RFID_UID}/attendance/{DATE}.
- * Validates UID normalization, student existence, active status, suspension expiry, overrides, and duplicates.
+ * Record attendance from ESP32 or portal into students/{studentDbId}/attendance/{DATE}.
+ * Resolves RFID Card UID -> Student Database ID dynamically via /rfid_to_student/{UID} and /students.
  */
 export async function recordAttendanceScan(
   uidInput: string,
   options?: {
     device?: string;
+    source?: string;
     studentsLookup?: Record<string, Student>;
     customTimestamp?: number;
   }
@@ -715,35 +986,26 @@ export async function recordAttendanceScan(
   const now = options?.customTimestamp ? new Date(options.customTimestamp) : new Date();
   const dateStr = getISTDateStr(now);
   const timeStr = getISTTimeStr(now);
-
   const db = getFirebaseDatabase();
-  const studentRef = ref(db, `students/${uid}`);
-  const studentAttRef = ref(db, `students/${uid}/attendance/${dateStr}`);
 
-  // 1. Find the student using students/{RFID_UID}
-  let student: Student | null = null;
-  if (options?.studentsLookup && options.studentsLookup[uid]) {
-    student = options.studentsLookup[uid];
-  } else {
-    try {
-      const studentSnap = await get(studentRef);
-      if (studentSnap.exists()) {
-        student = studentSnap.val();
-      }
-    } catch (e) {
-      console.warn('Could not query student record', e);
-    }
-  }
+  // 1. Dynamically resolve RFID card UID (or studentDbId) to authoritative student record
+  const resolved = await resolveStudentByAnyId(uid, options?.studentsLookup);
+  const student: Student | null = resolved?.student || null;
+  const studentDbId = resolved?.studentDbId || '';
+  const cardUid = resolved?.rfidUID || uid;
 
   // 2. Reject unknown RFID cards (never auto-register unknown cards)
-  if (!student) {
+  if (!student || !studentDbId) {
     const unknownRecord: AttendanceRecord = stripUndefinedDeep({
       uid,
+      studentUID: uid,
+      rfidUID: uid,
       studentName: 'UNKNOWN CARD',
       timestamp: now.getTime(),
       date: dateStr,
       time: timeStr,
       status: 'Unknown',
+      source: options?.source || 'rfid_scanner',
       device: options?.device || 'ESP32-READER-01',
       notes: 'Card not registered in student database. Access Denied.',
     });
@@ -762,11 +1024,14 @@ export async function recordAttendanceScan(
     };
   }
 
+  const studentRef = ref(db, `students/${studentDbId}`);
+  const studentAttRef = ref(db, `students/${studentDbId}/attendance/${dateStr}`);
+
   // 3. Reject inactive student accounts
   if (student.status === 'inactive') {
     return {
       success: false,
-      message: `ACCESS DENIED: Student ${student.name} (${uid}) account is INACTIVE. Attendance cannot be registered.`,
+      message: `ACCESS DENIED: Student ${student.name} (${cardUid}) account is INACTIVE. Attendance cannot be registered.`,
     };
   }
 
@@ -774,7 +1039,6 @@ export async function recordAttendanceScan(
   if (student.status === 'suspended' || student.isSuspended) {
     const activeSusp = student.activeSuspension;
     if (activeSusp && activeSusp.endDate && dateStr > activeSusp.endDate) {
-      // Suspension has expired: automatically restore active status
       student.status = 'active';
       student.isSuspended = false;
       student.activeSuspension = undefined;
@@ -784,7 +1048,7 @@ export async function recordAttendanceScan(
           isSuspended: false,
           activeSuspension: null,
         });
-        await update(ref(db, `suspensions/${uid}/${activeSusp.id}`), {
+        await update(ref(db, `suspensions/${studentDbId}/${activeSusp.id}`), {
           status: 'expired',
         });
       } catch (err) {
@@ -800,15 +1064,18 @@ export async function recordAttendanceScan(
     }
   }
 
-  // 5. Resolve student Auth UID and build validated record
-  const studentAuthUid = student.authUid || 
-    (KNOWN_STUDENT_AUTH_ACCOUNTS[uid] ? KNOWN_STUDENT_AUTH_ACCOUNTS[uid].uid : '') ||
-    Object.values(KNOWN_STUDENT_AUTH_ACCOUNTS).find((acc) => acc.rfidUID.toUpperCase() === uid)?.uid || '';
+  // 5. Build validated unified record using resolved student metadata
+  const studentAuthUid = student.authUid || '';
+  const resolvedSource =
+    options?.source ||
+    (options?.device && /manual|admin/i.test(options.device) ? 'admin_manual' : 'rfid_scanner');
 
   const record: AttendanceRecord = stripUndefinedDeep({
-    uid,
-    rfidUID: uid,
-    studentRfid: uid,
+    uid: cardUid,
+    studentUID: cardUid,
+    rfidUID: cardUid,
+    studentRfid: cardUid,
+    studentDbId,
     authUid: studentAuthUid,
     userId: studentAuthUid,
     studentName: student.name,
@@ -819,6 +1086,7 @@ export async function recordAttendanceScan(
     time: timeStr,
     timestamp: now.getTime(),
     status: 'Present',
+    source: resolvedSource,
     device: options?.device || 'ESP32-RFID-01',
   });
 
@@ -834,19 +1102,21 @@ export async function recordAttendanceScan(
   let blockedReason: 'overridden' | 'duplicate' | null = null;
   let existingRecordFound: AttendanceRecord | undefined = undefined;
 
-  const txResult = await runTransaction(studentAttRef, (currentVal) => {
-    if (currentVal && !currentVal.isDeleted) {
-      const existing = currentVal as AttendanceRecord;
-      existingRecordFound = existing;
-      if (existing.isOverridden && existing.status === 'Absent') {
-        blockedReason = 'overridden';
-      } else {
-        blockedReason = 'duplicate';
+  const txResult = await runRtdbOp('TRANSACTION', `/students/${studentDbId}/attendance/${dateStr}`, () =>
+    runTransaction(studentAttRef, (currentVal) => {
+      if (currentVal && !currentVal.isDeleted) {
+        const existing = currentVal as AttendanceRecord;
+        existingRecordFound = existing;
+        if (existing.isOverridden && existing.status === 'Absent') {
+          blockedReason = 'overridden';
+        } else {
+          blockedReason = 'duplicate';
+        }
+        return undefined;
       }
-      return undefined; // Abort transaction without overwriting
-    }
-    return record;
-  });
+      return record;
+    })
+  );
 
   if (!txResult.committed) {
     const existing = existingRecordFound || (txResult.snapshot.val() as AttendanceRecord | undefined);
@@ -886,7 +1156,7 @@ export async function recordAttendanceScan(
     const devRef = ref(db, `devices/${options?.device || 'ESP32-RFID-01'}`);
     await update(devRef, {
       lastPing: now.getTime(),
-      lastScannedUid: uid,
+      lastScannedUid: cardUid,
       status: 'online',
     });
   } catch {
@@ -912,30 +1182,6 @@ export async function refreshAdminToken(): Promise<boolean> {
     console.warn('Failed to force refresh admin auth token:', e);
   }
   return false;
-}
-
-// Seed the 3 required students if database is fresh (only if authenticated as Admin)
-export async function seedInitialStudentsIfEmpty(): Promise<boolean> {
-  try {
-    const auth = getFirebaseAuth();
-    if (!auth.currentUser || auth.currentUser.uid !== CONFIGURED_ADMIN_UID) {
-      return false;
-    }
-    const db = getFirebaseDatabase();
-    const studentsRef = ref(db, 'students');
-    const snapshot = await get(studentsRef);
-    
-    if (!snapshot.exists() || Object.keys(snapshot.val() || {}).length === 0) {
-      for (const student of INITIAL_STUDENTS) {
-        await set(ref(db, `students/${student.uid}`), student);
-      }
-      return true;
-    }
-    return false;
-  } catch (e) {
-    console.warn('Could not check or seed students', e);
-    return false;
-  }
 }
 
 /**
@@ -983,7 +1229,8 @@ export async function resetAttendanceData(
   if (!auth.currentUser) {
     throw new Error('AUTH_ERROR: No administrator is currently authenticated.');
   }
-  if (auth.currentUser.uid !== adminUid && auth.currentUser.uid !== CONFIGURED_ADMIN_UID) {
+  const authorizedAdmin = await isUserAdmin(auth.currentUser.uid);
+  if (!authorizedAdmin || (auth.currentUser.uid !== adminUid && auth.currentUser.uid !== CONFIGURED_ADMIN_UID)) {
     throw new Error(`UID_MISMATCH: Authenticated user (${auth.currentUser.uid}) is not authorized as Administrator.`);
   }
 
@@ -1037,7 +1284,9 @@ export async function resetAttendanceData(
 }
 
 /**
- * Register a student account with Firebase Authentication and save their profile in RTDB.
+ * Register a student account with Firebase Authentication and persist their unified mapping
+ * across /students/{studentDbId}, /rfid_to_student/{rfid}, /auth_to_student/{authUid},
+ * /users/{authUid}, and Firestore users/{authUid}.
  * Uses a secondary Firebase app instance to avoid logging out the administrator.
  */
 export async function registerStudentAccount(
@@ -1063,12 +1312,34 @@ export async function registerStudentAccount(
   }
 
   const db = getFirebaseDatabase();
+  const fs = getFirebaseFirestore();
 
-  // Check if RFID UID is already registered in student database
-  const existingRfidSnap = await get(ref(db, `students/${trimmedRfid}`));
-  if (existingRfidSnap.exists()) {
-    throw new Error(`A student is already registered with RFID Card UID: ${trimmedRfid}`);
+  // Enforce duplicate prevention across /rfid_to_student and /students
+  const idxSnap = await get(ref(db, `rfid_to_student/${trimmedRfid}`));
+  if (idxSnap.exists()) {
+    const val = idxSnap.val();
+    const isActiveIdx = typeof val === 'string' ? true : val?.active !== false;
+    if (isActiveIdx) {
+      throw new Error(`RFID Card UID ${trimmedRfid} is already registered to an existing student.`);
+    }
   }
+
+  const allStudentsSnap = await get(ref(db, 'students'));
+  if (allStudentsSnap.exists()) {
+    const allStudents = allStudentsSnap.val() as Record<string, Student>;
+    for (const [k, st] of Object.entries(allStudents)) {
+      if (!st) continue;
+      const stRfid = (st.rfidUID || st.uid || k).trim().toUpperCase();
+      if (stRfid === trimmedRfid) {
+        throw new Error(`A student (${st.name}) is already registered with RFID Card UID: ${trimmedRfid}`);
+      }
+      if (st.studentId && st.studentId.trim().toUpperCase() === trimmedRoll.toUpperCase()) {
+        throw new Error(`A student (${st.name}) is already registered with Roll Number: ${trimmedRoll}`);
+      }
+    }
+  }
+
+  const studentDbId = generateStudentDbId(trimmedRoll);
 
   // Create Firebase Auth user using isolated secondary app instance
   const config = getActiveFirebaseConfig();
@@ -1104,9 +1375,9 @@ export async function registerStudentAccount(
     }
   }
 
-  // Create user profile under users/{authUid}
-  const userProfile: UserProfile = {
+  const userProfile: UserProfile = stripUndefinedDeep({
     uid: authUid,
+    studentDbId,
     name: trimmedName,
     email: trimmedEmail,
     rollNumber: trimmedRoll,
@@ -1117,12 +1388,12 @@ export async function registerStudentAccount(
     rfidUID: trimmedRfid,
     phone: input.phone || '',
     createdAt: Date.now(),
-  };
-  await set(ref(db, `users/${authUid}`), userProfile);
+  });
 
-  // Create student registry record under students/{rfidUID}
-  const studentRecord: Student = {
+  const studentRecord: Student = stripUndefinedDeep({
+    studentDbId,
     uid: trimmedRfid,
+    rfidUID: trimmedRfid,
     name: trimmedName,
     studentId: trimmedRoll,
     department: input.department.trim(),
@@ -1133,14 +1404,52 @@ export async function registerStudentAccount(
     status: 'active',
     registeredAt: new Date().toISOString(),
     authUid,
-  };
-  await set(ref(db, `students/${trimmedRfid}`), studentRecord);
+  });
 
-  // Store rfid_to_uid mapping
+  // Persist universal bidirectional mappings across RTDB & Firestore
+  await runRtdbOp('SET', `/students/${studentDbId}`, () =>
+    set(ref(db, `students/${studentDbId}`), studentRecord)
+  );
+  await runRtdbOp('SET', `/users/${authUid}`, () =>
+    set(ref(db, `users/${authUid}`), userProfile)
+  );
+  await runRtdbOp('SET', `/auth_to_student/${authUid}`, () =>
+    set(
+      ref(db, `auth_to_student/${authUid}`),
+      stripUndefinedDeep({
+        authUid,
+        studentDbId,
+        rfidUID: trimmedRfid,
+        rollNumber: trimmedRoll,
+        email: trimmedEmail,
+        updatedAt: Date.now(),
+      })
+    )
+  );
+  await runRtdbOp('SET', `/rfid_to_student/${trimmedRfid}`, () =>
+    set(
+      ref(db, `rfid_to_student/${trimmedRfid}`),
+      stripUndefinedDeep({
+        rfidUID: trimmedRfid,
+        studentDbId,
+        authUid,
+        rollNumber: trimmedRoll,
+        active: true,
+        updatedAt: Date.now(),
+      })
+    )
+  );
+
   try {
     await set(ref(db, `rfid_to_uid/${trimmedRfid}`), authUid);
   } catch {
-    // Non-blocking
+    // Non-blocking legacy index sync
+  }
+
+  try {
+    await withTimeout(setDoc(doc(fs, 'users', authUid), userProfile, { merge: true }), 3000, null);
+  } catch (fsErr) {
+    console.warn('Notice syncing new student profile to Firestore:', fsErr);
   }
 
   return { authUid, student: studentRecord };
@@ -1202,7 +1511,34 @@ async function runRtdbOp<T>(operation: string, path: string, fn: () => Promise<T
 }
 
 /**
- * Verifies live Firebase Authentication session, administrator UID match, and active ID token.
+ * Checks whether the given Firebase Auth UID is an authorized Administrator
+ * via either the bootstrap admin UID or a verified role === 'admin' in RTDB /users or Firestore users.
+ */
+export async function isUserAdmin(authUid?: string | null): Promise<boolean> {
+  if (!authUid) return false;
+  if (authUid === CONFIGURED_ADMIN_UID) return true;
+
+  try {
+    const db = getFirebaseDatabase();
+    const uSnap = await withTimeout(get(ref(db, `users/${authUid}/role`)), 2500, null);
+    if (uSnap && uSnap.exists && uSnap.exists() && uSnap.val() === 'admin') {
+      return true;
+    }
+  } catch {}
+
+  try {
+    const fs = getFirebaseFirestore();
+    const docSnap = await withTimeout(getDoc(doc(fs, 'users', authUid)), 2500, null);
+    if (docSnap && docSnap.exists && docSnap.exists() && docSnap.data()?.role === 'admin') {
+      return true;
+    }
+  } catch {}
+
+  return false;
+}
+
+/**
+ * Verifies live Firebase Authentication session, administrator role/UID match, and active ID token.
  */
 export async function verifyAdministratorAuth(): Promise<{
   uid: string;
@@ -1221,12 +1557,13 @@ export async function verifyAdministratorAuth(): Promise<{
     );
   }
 
-  if (fbUser.uid !== CONFIGURED_ADMIN_UID) {
+  const adminAuthorized = await isUserAdmin(fbUser.uid);
+  if (!adminAuthorized) {
     throw new RtdbOperationError(
       'AUTH_UID_CHECK',
-      '/auth/currentUser',
+      `/users/${fbUser.uid}`,
       'UNAUTHORIZED_UID',
-      `Authenticated UID "${fbUser.uid}" does not match authorized administrator UID "${CONFIGURED_ADMIN_UID}".`
+      `Authenticated UID "${fbUser.uid}" does not have Administrator authorization.`
     );
   }
 
@@ -1256,61 +1593,229 @@ export async function verifyAdministratorAuth(): Promise<{
 }
 
 /**
- * Links and synchronizes existing student accounts in Firestore 'users' collection
- * Document ID = authUid
- * Preserves any existing fields and does not overwrite with empty values.
+ * Admin-only dynamic reconciliation: links existing and newly registered students
+ * across /students/{studentDbId}, /rfid_to_student/{rfid}, /auth_to_student/{authUid},
+ * /users/{authUid}, and Firestore users/{authUid}.
+ * - Preserves all existing student data and RFID assignments.
+ * - Never guesses mappings when multiple candidates match.
  */
-export async function linkExistingStudentProfilesInFirestore(): Promise<void> {
-  const fs = getFirebaseFirestore();
-  const db = getFirebaseDatabase();
-
-  for (const account of Object.values(KNOWN_STUDENT_AUTH_ACCOUNTS)) {
-    try {
-      const docRef = doc(fs, 'users', account.uid);
-      
-      const profilePayload: Record<string, any> = {
-        email: account.email,
-        role: 'student',
-        name: account.name,
-        rollNumber: account.rollNumber,
-        rfidUID: account.rfidUID,
-        department: account.department,
-        year: account.year,
-        semester: account.semester,
-        phone: account.phone,
-        createdAt: Date.now(),
-      };
-
-      // Atomic non-blocking merge with 2000ms timeout
-      await withTimeout(setDoc(docRef, profilePayload, { merge: true }), 2000, null);
-
-      // Sync RTDB in background
-      try {
-        await withTimeout(update(ref(db, `users/${account.uid}`), profilePayload), 2000, null);
-        await withTimeout(update(ref(db, `rfid_to_uid/${account.rfidUID}`), { authUid: account.uid }), 2000, null);
-        await withTimeout(update(ref(db, `students/${account.rfidUID}`), {
-          authUid: account.uid,
-          email: account.email,
-        }), 2000, null);
-      } catch {
-        // Non-blocking
-      }
-    } catch (err) {
-      console.warn(`Notice linking student ${account.email} in Firestore:`, err);
+export async function reconcileAllStudentMappings(
+  studentsMapOverride?: Record<string, Student>
+): Promise<{ linkedCount: number; ambiguousStudents: string[] }> {
+  const ambiguousStudents: string[] = [];
+  try {
+    const auth = getFirebaseAuth();
+    if (!auth.currentUser) {
+      return { linkedCount: 0, ambiguousStudents };
     }
+    const adminAuthorized = await isUserAdmin(auth.currentUser.uid);
+    if (!adminAuthorized) {
+      return { linkedCount: 0, ambiguousStudents };
+    }
+
+    const db = getFirebaseDatabase();
+    const fs = getFirebaseFirestore();
+    let linkedCount = 0;
+
+    let studentsMap = studentsMapOverride;
+    if (!studentsMap) {
+      const sSnap = await withTimeout(get(ref(db, 'students')), 4000, null);
+      studentsMap = (sSnap && sSnap.exists && sSnap.exists() ? sSnap.val() : {}) as Record<string, Student>;
+    }
+
+    // Collect known user accounts dynamically from RTDB /users, /auth_to_student, /rfid_to_uid, and Firestore users
+    const userRecordsByAuthUid: Record<string, Partial<UserProfile>> = {};
+    const authToStudentMap: Record<string, any> = {};
+    const rfidToUidMap: Record<string, string> = {};
+
+    try {
+      const rtdbUsersSnap = await withTimeout(get(ref(db, 'users')), 3000, null);
+      if (rtdbUsersSnap && rtdbUsersSnap.exists && rtdbUsersSnap.exists()) {
+        const uVal = rtdbUsersSnap.val() as Record<string, Partial<UserProfile>>;
+        Object.entries(uVal || {}).forEach(([uid, u]) => {
+          if (u && uid !== CONFIGURED_ADMIN_UID && u.role !== 'admin') {
+            userRecordsByAuthUid[uid] = { ...u, uid };
+          }
+        });
+      }
+    } catch {}
+
+    try {
+      const a2sSnap = await withTimeout(get(ref(db, 'auth_to_student')), 3000, null);
+      if (a2sSnap && a2sSnap.exists && a2sSnap.exists()) {
+        const aVal = a2sSnap.val() as Record<string, any>;
+        Object.entries(aVal || {}).forEach(([uid, m]) => {
+          if (!m) return;
+          authToStudentMap[uid] = m;
+          if (uid !== CONFIGURED_ADMIN_UID) {
+            userRecordsByAuthUid[uid] = {
+              ...(userRecordsByAuthUid[uid] || {}),
+              uid,
+              studentDbId: userRecordsByAuthUid[uid]?.studentDbId || m.studentDbId,
+              rfidUID: userRecordsByAuthUid[uid]?.rfidUID || m.rfidUID,
+              rollNumber: userRecordsByAuthUid[uid]?.rollNumber || m.rollNumber,
+              email: userRecordsByAuthUid[uid]?.email || m.email,
+              role: 'student',
+            };
+          }
+        });
+      }
+    } catch {}
+
+    try {
+      const r2uSnap = await withTimeout(get(ref(db, 'rfid_to_uid')), 2500, null);
+      if (r2uSnap && r2uSnap.exists && r2uSnap.exists()) {
+        const rVal = r2uSnap.val() as Record<string, any>;
+        Object.entries(rVal || {}).forEach(([rfid, val]) => {
+          const authUid = typeof val === 'string' ? val : val?.authUid;
+          if (authUid && typeof authUid === 'string') {
+            rfidToUidMap[rfid.trim().toUpperCase()] = authUid.trim();
+          }
+        });
+      }
+    } catch {}
+
+    try {
+      const fsSnap = await withTimeout(getDocs(collection(fs, 'users')), 3000, null);
+      if (fsSnap && fsSnap.docs) {
+        fsSnap.docs.forEach((d) => {
+          const data = d.data() as Partial<UserProfile>;
+          if (data && d.id !== CONFIGURED_ADMIN_UID && data.role !== 'admin') {
+            userRecordsByAuthUid[d.id] = {
+              ...(userRecordsByAuthUid[d.id] || {}),
+              ...data,
+              uid: d.id,
+            };
+          }
+        });
+      }
+    } catch {}
+
+    const findMatchingAuthCandidates = (st: Student, dbKey: string, rfid: string): string[] => {
+      if (st.authUid && st.authUid.trim()) {
+        return [st.authUid.trim()];
+      }
+      const candidates = new Set<string>();
+      if (rfidToUidMap[rfid] && rfidToUidMap[rfid] !== CONFIGURED_ADMIN_UID) {
+        candidates.add(rfidToUidMap[rfid]);
+      }
+      const stEmail = (st.email || '').trim().toLowerCase();
+      const stRoll = (st.studentId || '').trim().toUpperCase();
+      for (const [authUid, u] of Object.entries(userRecordsByAuthUid)) {
+        if (!authUid || authUid === CONFIGURED_ADMIN_UID || u.role === 'admin') continue;
+        const uEmail = (u.email || '').trim().toLowerCase();
+        const uRoll = (u.rollNumber || '').trim().toUpperCase();
+        const uRfid = (u.rfidUID || '').trim().toUpperCase();
+        if (
+          (u.studentDbId && u.studentDbId === dbKey) ||
+          (uRfid && uRfid === rfid) ||
+          (stEmail && uEmail && stEmail === uEmail) ||
+          (stRoll && uRoll && stRoll === uRoll)
+        ) {
+          candidates.add(authUid);
+        }
+      }
+      return Array.from(candidates);
+    };
+
+    for (const [dbKey, st] of Object.entries(studentsMap || {})) {
+      if (!st || typeof st !== 'object') continue;
+      const rfidUID = (st.rfidUID || st.uid || dbKey).trim().toUpperCase();
+      const candidates = findMatchingAuthCandidates(st, dbKey, rfidUID);
+
+      if (candidates.length > 1) {
+        // Never guess when multiple Auth UIDs match the same student
+        ambiguousStudents.push(dbKey);
+      }
+
+      const resolvedAuthUid = candidates.length === 1 ? candidates[0] : (st.authUid || '').trim();
+
+      const studentUpdates: Record<string, any> = {};
+      if (!st.studentDbId) studentUpdates.studentDbId = dbKey;
+      if (!st.rfidUID && rfidUID) studentUpdates.rfidUID = rfidUID;
+      if (!st.uid && rfidUID) studentUpdates.uid = rfidUID;
+      if (resolvedAuthUid && !st.authUid) {
+        studentUpdates.authUid = resolvedAuthUid;
+      }
+
+      if (Object.keys(studentUpdates).length > 0) {
+        await update(ref(db, `students/${dbKey}`), stripUndefinedDeep(studentUpdates)).catch(() => {});
+      }
+
+      await update(
+        ref(db, `rfid_to_student/${rfidUID}`),
+        stripUndefinedDeep({
+          rfidUID,
+          studentDbId: dbKey,
+          authUid: resolvedAuthUid || '',
+          rollNumber: st.studentId || '',
+          active: st.status !== 'inactive',
+          updatedAt: Date.now(),
+        })
+      ).catch(() => {});
+
+      if (resolvedAuthUid) {
+        const existingU = userRecordsByAuthUid[resolvedAuthUid] || {};
+        const profilePayload: UserProfile = stripUndefinedDeep({
+          uid: resolvedAuthUid,
+          studentDbId: dbKey,
+          name: st.name || existingU.name || 'Student',
+          email: (st.email || existingU.email || '').trim().toLowerCase(),
+          rollNumber: st.studentId || existingU.rollNumber || '',
+          department: st.department || existingU.department || '',
+          year: st.year || existingU.year || '',
+          semester: st.semester || existingU.semester || 'Semester 1',
+          role: existingU.role === 'admin' ? 'admin' : 'student',
+          rfidUID,
+          phone: st.phone || existingU.phone || '',
+          createdAt: existingU.createdAt || Date.now(),
+        });
+
+        await update(ref(db, `users/${resolvedAuthUid}`), profilePayload).catch(() => {});
+        await set(
+          ref(db, `auth_to_student/${resolvedAuthUid}`),
+          stripUndefinedDeep({
+            authUid: resolvedAuthUid,
+            studentDbId: dbKey,
+            rfidUID,
+            rollNumber: st.studentId || '',
+            email: profilePayload.email,
+            updatedAt: Date.now(),
+          })
+        ).catch(() => {});
+        await update(ref(db, `rfid_to_uid/${rfidUID}`), { authUid: resolvedAuthUid }).catch(() => {});
+        await withTimeout(
+          setDoc(doc(fs, 'users', resolvedAuthUid), profilePayload, { merge: true }),
+          2000,
+          null
+        ).catch(() => {});
+        linkedCount++;
+      }
+    }
+
+    return { linkedCount, ambiguousStudents };
+  } catch (err) {
+    console.warn('Reconcile student mappings notice:', err);
+    return { linkedCount: 0, ambiguousStudents };
   }
 }
 
 /**
- * Fetch user profile from Firestore users/{uid} or infer from directory with strict timeout protection
+ * Fetch user profile dynamically using the strict 7-step flow:
+ * 1. Read /users/{authUid} and /auth_to_student/{authUid} (and Firestore users/{authUid})
+ * 2. Distinguish PERMISSION_DENIED vs non-existent profile (missing profile returns null)
+ * 3. Verify role ('admin' or 'student') separately
+ * 4. For students, retrieve verified studentDbId and read /students/{studentDbId}
  */
 export async function getUserProfile(
   authUid: string,
   email?: string | null
 ): Promise<UserProfile | null> {
   const normalizedEmail = email?.trim().toLowerCase();
+  const db = getFirebaseDatabase();
+  const fs = getFirebaseFirestore();
 
-  // 1. Instant check: configured Admin
+  // 1. Bootstrap Administrator: still verify/ensure /users/{adminUid} exists cleanly
   if (authUid === CONFIGURED_ADMIN_UID) {
     const adminProfile: UserProfile = {
       uid: authUid,
@@ -1324,63 +1829,83 @@ export async function getUserProfile(
       rfidUID: '',
       createdAt: Date.now(),
     };
-    // Non-blocking background sync
     try {
-      const fs = getFirebaseFirestore();
+      const existingAdminSnap = await withTimeout(get(ref(db, `users/${authUid}`)), 2500, null);
+      if (!existingAdminSnap || !existingAdminSnap.exists || !existingAdminSnap.exists() || existingAdminSnap.val()?.role !== 'admin') {
+        await withTimeout(update(ref(db, `users/${authUid}`), stripUndefinedDeep(adminProfile)), 2500, null);
+      }
+    } catch {}
+    try {
       withTimeout(setDoc(doc(fs, 'users', authUid), adminProfile, { merge: true }), 2000, null).catch(() => {});
     } catch {}
     return adminProfile;
   }
 
-  // 2. Instant check: known student authentication accounts mapping
-  const knownAccount = 
-    KNOWN_STUDENT_AUTH_ACCOUNTS[authUid] || 
-    (normalizedEmail ? KNOWN_STUDENTS_BY_EMAIL[normalizedEmail] : undefined);
+  let authMapping: Record<string, any> | null = null;
+  let rtdbProfile: Partial<UserProfile> | null = null;
+  let firestoreProfile: Partial<UserProfile> | null = null;
+  const permissionDeniedPaths: string[] = [];
+  let authExpiredDiag: { diag: DbDiagnosticState; path: string } | null = null;
+  let networkErrorDiag: { diag: DbDiagnosticState; path: string } | null = null;
 
-  if (knownAccount) {
-    const resolvedProfile: UserProfile = {
-      uid: authUid,
-      email: knownAccount.email,
-      role: 'student',
-      name: knownAccount.name,
-      rollNumber: knownAccount.rollNumber,
-      rfidUID: knownAccount.rfidUID,
-      department: knownAccount.department,
-      year: knownAccount.year,
-      semester: knownAccount.semester,
-      phone: knownAccount.phone,
-      createdAt: Date.now(),
-    };
-
-    // Non-blocking background sync to Firestore & RTDB
-    try {
-      const fs = getFirebaseFirestore();
-      withTimeout(setDoc(doc(fs, 'users', authUid), resolvedProfile, { merge: true }), 2000, null).catch(() => {});
-      const db = getFirebaseDatabase();
-      withTimeout(update(ref(db, `users/${authUid}`), resolvedProfile), 2000, null).catch(() => {});
-      withTimeout(update(ref(db, `rfid_to_uid/${knownAccount.rfidUID}`), { authUid }), 2000, null).catch(() => {});
-      withTimeout(update(ref(db, `students/${knownAccount.rfidUID}`), { authUid, email: knownAccount.email }), 2000, null).catch(() => {});
-    } catch {}
-
-    return resolvedProfile;
+  // 2a. Read /users/{authUid} (primary user profile & role source)
+  try {
+    const userSnap = await withTimeoutReject(
+      get(ref(db, `users/${authUid}`)),
+      4500,
+      `Timed out reading /users/${authUid}`
+    );
+    if (userSnap.exists()) {
+      rtdbProfile = userSnap.val() as Partial<UserProfile>;
+    }
+  } catch (err: any) {
+    const diag = classifyFirebaseError(err);
+    const p = `/users/${authUid}`;
+    if (diag.code === 'auth_expired') {
+      authExpiredDiag = { diag, path: p };
+    } else if (diag.code === 'permission_denied') {
+      permissionDeniedPaths.push(p);
+    } else if (diag.code === 'disconnected') {
+      networkErrorDiag = { diag, path: p };
+    }
   }
 
-  // 3. Retrieve student profile from Firestore users/{authUid} with 2500ms timeout
-  let firestoreProfile: UserProfile | null = null;
+  // 2b. Read /auth_to_student/{authUid} (authoritative student mapping source)
   try {
-    const fs = getFirebaseFirestore();
-    const docRef = doc(fs, 'users', authUid);
-    const docSnap = await withTimeout(getDoc(docRef), 2500, null);
+    const mapSnap = await withTimeoutReject(
+      get(ref(db, `auth_to_student/${authUid}`)),
+      4000,
+      `Timed out reading /auth_to_student/${authUid}`
+    );
+    if (mapSnap.exists()) {
+      authMapping = mapSnap.val();
+    }
+  } catch (err: any) {
+    const diag = classifyFirebaseError(err);
+    const p = `/auth_to_student/${authUid}`;
+    if (diag.code === 'auth_expired' && !authExpiredDiag) {
+      authExpiredDiag = { diag, path: p };
+    } else if (diag.code === 'permission_denied') {
+      permissionDeniedPaths.push(p);
+    } else if (diag.code === 'disconnected' && !networkErrorDiag) {
+      networkErrorDiag = { diag, path: p };
+    }
+  }
 
-    if (docSnap && docSnap.exists && docSnap.exists()) {
+  // 2c. Read Firestore users/{authUid} (secondary mirror, strictly owner-readable)
+  try {
+    const docRef = doc(fs, 'users', authUid);
+    const docSnap = await withTimeoutReject(getDoc(docRef), 4000, 'Timed out reading Firestore profile');
+    if (docSnap.exists()) {
       const data = docSnap.data();
       firestoreProfile = {
         uid: authUid,
+        studentDbId: data.studentDbId || '',
         email: data.email || normalizedEmail || '',
         role: data.role || 'student',
         name: data.name || data.displayName || '',
         rollNumber: data.rollNumber || data.studentId || '',
-        rfidUID: data.rfidUID || '',
+        rfidUID: (data.rfidUID || '').toString().trim().toUpperCase(),
         department: data.department || '',
         year: data.year || '',
         semester: data.semester || '',
@@ -1388,92 +1913,148 @@ export async function getUserProfile(
         createdAt: data.createdAt || Date.now(),
       };
     }
-  } catch (fsErr) {
-    console.warn('Firestore user doc read notice:', fsErr);
-  }
-
-  if (firestoreProfile && firestoreProfile.role) {
-    if (firestoreProfile.role === 'student' && !firestoreProfile.rfidUID) {
-      const studentMatch = lookupStudentInfo(firestoreProfile.rollNumber || '') || 
-                           lookupStudentInfo(firestoreProfile.email || '') || 
-                           lookupStudentInfo(authUid);
-      if (studentMatch) {
-        firestoreProfile.rfidUID = studentMatch.rfidUID;
-        if (!firestoreProfile.rollNumber) firestoreProfile.rollNumber = studentMatch.studentId;
-        if (!firestoreProfile.name) firestoreProfile.name = studentMatch.name;
-        if (!firestoreProfile.department) firestoreProfile.department = studentMatch.department;
-      }
+  } catch (fsErr: any) {
+    const diag = classifyFirebaseError(fsErr);
+    const p = `firestore/users/${authUid}`;
+    if (diag.code === 'auth_expired' && !authExpiredDiag) {
+      authExpiredDiag = { diag, path: p };
+    } else if (diag.code === 'permission_denied') {
+      permissionDeniedPaths.push(p);
     }
-    return firestoreProfile;
   }
 
-  // 4. Fallback: check Realtime Database users/{authUid} with 2000ms timeout
-  const db = getFirebaseDatabase();
-  try {
-    const userSnap = await withTimeout(get(ref(db, `users/${authUid}`)), 2000, null);
-    if (userSnap && userSnap.exists && userSnap.exists()) {
-      const rtdbProfile = userSnap.val() as UserProfile;
-      const merged: UserProfile = {
-        ...rtdbProfile,
-        ...(firestoreProfile || {}),
-        uid: authUid,
-      };
-      if (merged.role === 'student' && !merged.rfidUID) {
-        const studentMatch = lookupStudentInfo(merged.rollNumber || '') || 
-                             lookupStudentInfo(merged.email || '') || 
-                             lookupStudentInfo(authUid);
-        if (studentMatch) {
-          merged.rfidUID = studentMatch.rfidUID;
-        }
-      }
-      return merged;
-    }
-  } catch (e) {
-    console.warn('Error reading RTDB users node:', e);
-  }
-
-  // 5. Fallback: match by email or authUid in students node with 2000ms timeout
-  try {
-    const studentsSnap = await withTimeout(get(ref(db, 'students')), 2000, null);
-    if (studentsSnap && studentsSnap.exists && studentsSnap.exists()) {
-      const allStudents = studentsSnap.val() as Record<string, Student>;
-      const matched = Object.values(allStudents).find(
-        (st) =>
-          st.authUid === authUid ||
-          (normalizedEmail && st.email && st.email.toLowerCase() === normalizedEmail)
+  // If no profile source returned data, prioritize Auth Expiration -> Permission Denied -> Network -> Missing Profile (null)
+  const hasAnyProfile = Boolean(authMapping || rtdbProfile || firestoreProfile);
+  if (!hasAnyProfile) {
+    if (authExpiredDiag) {
+      throw new AuthProfileError(
+        'auth_expired',
+        `${authExpiredDiag.diag.message} (Path: ${authExpiredDiag.path})`,
+        authExpiredDiag.path,
+        'GET'
       );
-
-      if (matched) {
-        const studentProfile: UserProfile = {
-          uid: authUid,
-          name: matched.name,
-          email: matched.email,
-          rollNumber: matched.studentId,
-          department: matched.department,
-          year: matched.year,
-          semester: matched.semester || 'Semester 1',
-          role: 'student',
-          rfidUID: matched.uid,
-          phone: matched.phone || '',
-          createdAt: Date.now(),
-        };
-
-        // Non-blocking sync
-        try {
-          const fs = getFirebaseFirestore();
-          withTimeout(setDoc(doc(fs, 'users', authUid), studentProfile, { merge: true }), 2000, null).catch(() => {});
-          withTimeout(set(ref(db, `users/${authUid}`), studentProfile), 2000, null).catch(() => {});
-        } catch {}
-
-        return studentProfile;
-      }
     }
-  } catch (e) {
-    console.warn('Error finding student in directory:', e);
+    if (permissionDeniedPaths.length > 0) {
+      const primaryPath = permissionDeniedPaths.find((p) => p.startsWith('/users/')) || permissionDeniedPaths[0];
+      throw new AuthProfileError(
+        'permission_denied',
+        `Permission denied (Path: ${primaryPath}). Verify Firebase Realtime Database Rules grant authenticated users read access to their own /users/{auth.uid} and /auth_to_student/{auth.uid} profile.`,
+        primaryPath,
+        'GET'
+      );
+    }
+    if (networkErrorDiag) {
+      throw new AuthProfileError(
+        'disconnected',
+        `${networkErrorDiag.diag.message} (Path: ${networkErrorDiag.path})`,
+        networkErrorDiag.path,
+        'GET'
+      );
+    }
+    // All readable paths explicitly returned non-existent (!exists()) -> missing profile
+    return null;
   }
 
-  // Profile does not exist anywhere
-  return null;
+  // 3. Role verification: Admin accounts do NOT require studentDbId / RFID mapping
+  const mergedRole: UserRole =
+    rtdbProfile?.role === 'admin' || firestoreProfile?.role === 'admin' ? 'admin' : 'student';
+
+  if (mergedRole === 'admin') {
+    return {
+      uid: authUid,
+      name: rtdbProfile?.name || firestoreProfile?.name || 'Administrator',
+      email: rtdbProfile?.email || firestoreProfile?.email || normalizedEmail || '',
+      rollNumber: rtdbProfile?.rollNumber || firestoreProfile?.rollNumber || 'ADMIN',
+      department: rtdbProfile?.department || firestoreProfile?.department || 'System Administration',
+      year: rtdbProfile?.year || firestoreProfile?.year || 'Staff',
+      semester: rtdbProfile?.semester || firestoreProfile?.semester || 'N/A',
+      role: 'admin',
+      rfidUID: '',
+      createdAt: rtdbProfile?.createdAt || firestoreProfile?.createdAt || Date.now(),
+    };
+  }
+
+  // 4. Student role: retrieve verified studentDbId and rfidUID
+  let studentDbId = (
+    authMapping?.studentDbId ||
+    rtdbProfile?.studentDbId ||
+    firestoreProfile?.studentDbId ||
+    ''
+  ).toString().trim();
+
+  let rfidUID = (
+    authMapping?.rfidUID ||
+    rtdbProfile?.rfidUID ||
+    firestoreProfile?.rfidUID ||
+    ''
+  ).toString().trim().toUpperCase();
+
+  if (!studentDbId && rfidUID) {
+    studentDbId = rfidUID;
+  }
+
+  if (!studentDbId) {
+    throw new AuthProfileError(
+      'mapping_missing',
+      'Your Firebase account is authenticated, but your Student Database ID and RFID Card mapping are missing. Ask an administrator to link your account.',
+      `/users/${authUid}`,
+      'GET'
+    );
+  }
+
+  // 5. Retrieve student profile from /students/{studentDbId} using scoped direct read
+  let studentNode: Student | null = null;
+  try {
+    const studentSnap = await withTimeoutReject(
+      get(ref(db, `students/${studentDbId}`)),
+      4500,
+      `Timed out reading /students/${studentDbId}`
+    );
+    if (!studentSnap.exists()) {
+      throw new AuthProfileError(
+        'not_registered',
+        `Student profile not registered (Path: /students/${studentDbId}). Contact your administrator.`,
+        `/students/${studentDbId}`,
+        'GET'
+      );
+    }
+    studentNode = studentSnap.val() as Student;
+    rfidUID = (studentNode.rfidUID || studentNode.uid || rfidUID || studentDbId).trim().toUpperCase();
+  } catch (stuErr: any) {
+    if (stuErr instanceof AuthProfileError) {
+      throw stuErr;
+    }
+    const diag = classifyFirebaseError(stuErr);
+    if (diag.code === 'auth_expired' || diag.code === 'permission_denied' || diag.code === 'disconnected') {
+      throw new AuthProfileError(
+        diag.code,
+        `${diag.message} (Path: /students/${studentDbId})`,
+        `/students/${studentDbId}`,
+        'GET'
+      );
+    }
+    throw stuErr;
+  }
+
+  return {
+    uid: authUid,
+    studentDbId,
+    name: studentNode?.name || rtdbProfile?.name || firestoreProfile?.name || 'Student',
+    email: studentNode?.email || rtdbProfile?.email || firestoreProfile?.email || normalizedEmail || '',
+    rollNumber:
+      studentNode?.studentId ||
+      authMapping?.rollNumber ||
+      rtdbProfile?.rollNumber ||
+      firestoreProfile?.rollNumber ||
+      '',
+    department: studentNode?.department || rtdbProfile?.department || firestoreProfile?.department || '',
+    year: studentNode?.year || rtdbProfile?.year || firestoreProfile?.year || '',
+    semester: studentNode?.semester || rtdbProfile?.semester || firestoreProfile?.semester || 'Semester 1',
+    role: 'student',
+    rfidUID,
+    phone: studentNode?.phone || rtdbProfile?.phone || firestoreProfile?.phone || '',
+    createdAt: rtdbProfile?.createdAt || firestoreProfile?.createdAt || Date.now(),
+  };
 }
 
 /**
@@ -1494,6 +2075,7 @@ export async function sendPasswordReset(email: string): Promise<void> {
 }
 
 export interface StudentSubscriptionTarget {
+  studentDbId?: string;
   rfidUID: string;
   authUid?: string;
   studentId?: string;
@@ -1501,9 +2083,11 @@ export interface StudentSubscriptionTarget {
 }
 
 /**
- * Resolves student metadata for an RFID UID, studentId, authUid, email, or name
+ * Resolves student metadata dynamically from live cachedStudentsMap using any identifier
+ * (studentDbId, RFID UID, studentId, authUid, email, or name). Zero hardcoded entries.
  */
 export function lookupStudentInfo(identifier: string): {
+  studentDbId: string;
   name: string;
   studentId: string;
   rfidUID: string;
@@ -1515,33 +2099,39 @@ export function lookupStudentInfo(identifier: string): {
   const raw = identifier.trim();
   const clean = raw.toUpperCase();
   const lower = raw.toLowerCase();
-  const emailPrefix = lower.includes('@') ? lower.split('@')[0] : lower;
 
-  // 1. Check in-memory cachedStudentsMap (from live RTDB students node)
-  if (cachedStudentsMap[clean]) {
-    const s = cachedStudentsMap[clean];
+  const direct = cachedStudentsMap[raw] || cachedStudentsMap[clean];
+  if (direct) {
+    const studentDbId = (direct.studentDbId || (cachedStudentsMap[raw] ? raw : clean)).trim();
     return {
-      name: s.name,
-      studentId: s.studentId,
-      rfidUID: s.uid.toUpperCase(),
-      authUid: s.authUid || '',
-      department: s.department,
-      email: s.email,
+      studentDbId,
+      name: direct.name,
+      studentId: direct.studentId,
+      rfidUID: (direct.rfidUID || direct.uid || '').trim().toUpperCase(),
+      authUid: direct.authUid || '',
+      department: direct.department,
+      email: direct.email,
     };
   }
 
-  for (const s of Object.values(cachedStudentsMap)) {
+  for (const [dbKey, s] of Object.entries(cachedStudentsMap)) {
+    if (!s) continue;
+    const stDbId = (s.studentDbId || dbKey).trim();
+    const stRfid = (s.rfidUID || s.uid || '').trim().toUpperCase();
     if (
-      s.uid.toUpperCase() === clean ||
-      s.studentId.toUpperCase() === clean ||
-      (s.authUid && s.authUid === identifier) ||
-      (s.email && s.email.toLowerCase() === lower) ||
-      (s.name && s.name.toLowerCase() === lower)
+      stDbId === raw ||
+      stDbId.toUpperCase() === clean ||
+      stRfid === clean ||
+      (s.studentId && s.studentId.trim().toUpperCase() === clean) ||
+      (s.authUid && s.authUid === raw) ||
+      (s.email && s.email.trim().toLowerCase() === lower) ||
+      (s.name && s.name.trim().toLowerCase() === lower)
     ) {
       return {
+        studentDbId: stDbId,
         name: s.name,
         studentId: s.studentId,
-        rfidUID: s.uid.toUpperCase(),
+        rfidUID: stRfid,
         authUid: s.authUid || '',
         department: s.department,
         email: s.email,
@@ -1549,118 +2139,35 @@ export function lookupStudentInfo(identifier: string): {
     }
   }
 
-  // 2. Check INITIAL_STUDENTS
-  const initStudent = INITIAL_STUDENTS.find(
-    (s) =>
-      s.uid.toUpperCase() === clean ||
-      s.studentId.toUpperCase() === clean ||
-      s.authUid === identifier ||
-      s.email.toLowerCase() === lower ||
-      s.email.toLowerCase().startsWith(emailPrefix) ||
-      s.name.toLowerCase() === lower
-  );
-  if (initStudent) {
-    return {
-      name: initStudent.name,
-      studentId: initStudent.studentId,
-      rfidUID: initStudent.uid.toUpperCase(),
-      authUid: initStudent.authUid || '',
-      department: initStudent.department,
-      email: initStudent.email,
-    };
-  }
-
-  // 3. Check KNOWN_STUDENT_AUTH_ACCOUNTS
-  for (const acc of Object.values(KNOWN_STUDENT_AUTH_ACCOUNTS)) {
-    if (
-      acc.rfidUID.toUpperCase() === clean ||
-      acc.rollNumber.toUpperCase() === clean ||
-      acc.uid === identifier ||
-      acc.email.toLowerCase() === lower ||
-      acc.email.toLowerCase().startsWith(emailPrefix) ||
-      acc.name.toLowerCase() === lower
-    ) {
-      return {
-        name: acc.name,
-        studentId: acc.rollNumber,
-        rfidUID: acc.rfidUID.toUpperCase(),
-        authUid: acc.uid,
-        department: acc.department,
-        email: acc.email,
-      };
-    }
-  }
-
-  // 4. Check known email aliases directly
-  if (KNOWN_STUDENTS_BY_EMAIL[lower]) {
-    const acc = KNOWN_STUDENTS_BY_EMAIL[lower];
-    return {
-      name: acc.name,
-      studentId: acc.rollNumber,
-      rfidUID: acc.rfidUID.toUpperCase(),
-      authUid: acc.uid,
-      department: acc.department,
-      email: acc.email,
-    };
-  }
-
-  // 5. Hardcoded identifier mappings for Shakir, Zaheer, and Rehan
-  if (clean === '0A37B224' || clean === 'STU-2024-002' || lower.includes('shakir')) {
-    return {
-      name: 'Shakir Ahmed',
-      studentId: 'STU-2024-002',
-      rfidUID: '0A37B224',
-      authUid: 'rUyNTxxi8tYnv3314Jc9poaiKHA3',
-      department: 'Electronics & Communication',
-      email: 'shakir@gmail.com',
-    };
-  }
-  if (clean === '8A75B525' || clean === 'STU-2024-003' || lower.includes('zaheer')) {
-    return {
-      name: 'Mohammed Zaheer',
-      studentId: 'STU-2024-003',
-      rfidUID: '8A75B525',
-      authUid: 'K0umaWs1dbMWbOsCuWzC5pH7BGe2',
-      department: 'Information Technology',
-      email: 'zaheer@gmail.com',
-    };
-  }
-  if (clean === '5AA5AB24' || clean === 'STU-2024-001' || lower.includes('rehan')) {
-    return {
-      name: 'Mohammed Rehan',
-      studentId: 'STU-2024-001',
-      rfidUID: '5AA5AB24',
-      authUid: 'bi3c890VUXhVE0JFxroYfnlQwea2',
-      department: 'Computer Science & Engineering',
-      email: 'techbyrehan123@gmail.com',
-    };
-  }
-
   return null;
 }
 
 /**
  * Normalizes an attendance record from Firebase RTDB or Firestore.
- * Ensures every record contains studentId, rollNumber, rfidUID, studentName, date, time, status,
- * and a valid Unix epoch timestamp (resolving 10-digit Unix seconds and ESP32 millis() if present).
  */
 export function normalizeAttendanceRecord(
   rawRecord: any,
   dateKey: string,
-  rfidKey: string
+  rfidKey: string,
+  explicitStudentDbId?: string
 ): AttendanceRecord {
-  const rawRfid = (rawRecord?.rfidUID || rawRecord?.uid || rawRecord?.studentRfid || rfidKey || '').toString().trim().toUpperCase();
+  const rawRfid = (rawRecord?.rfidUID || rawRecord?.uid || rawRecord?.studentRfid || rfidKey || '')
+    .toString()
+    .trim()
+    .toUpperCase();
+  const rawDbId = (explicitStudentDbId || rawRecord?.studentDbId || '').toString().trim();
   const rawStudentId = (rawRecord?.studentId || rawRecord?.rollNumber || '').toString().trim();
   const rawAuthUid = rawRecord?.authUid || rawRecord?.userId || '';
   const rawName = (rawRecord?.studentName || rawRecord?.name || '').toString().trim();
 
-  // Look up student metadata using any available identifier (RFID, studentId, authUid, or name)
-  const student = 
-    lookupStudentInfo(rawRfid) || 
-    lookupStudentInfo(rawStudentId) || 
+  const student =
+    (rawDbId ? lookupStudentInfo(rawDbId) : null) ||
+    lookupStudentInfo(rawRfid) ||
+    lookupStudentInfo(rawStudentId) ||
     lookupStudentInfo(rawAuthUid) ||
     (rawName ? lookupStudentInfo(rawName) : null);
 
+  const studentDbId = student?.studentDbId || rawDbId || rawRfid;
   const studentId = student?.studentId || rawStudentId || '';
   const rfidUID = student?.rfidUID || rawRfid;
   const studentName = student?.name || rawName || (rfidUID ? `Student (${rfidUID})` : 'Student');
@@ -1670,12 +2177,6 @@ export function normalizeAttendanceRecord(
   const recordDate = rawRecord?.date || dateKey;
   const recordTime = rawRecord?.time || rawRecord?.checkInTime || '00:00:00';
 
-  // Compute true Unix epoch timestamp in milliseconds
-  // Handles:
-  // 1. Millisecond timestamps (> 1.5e12)
-  // 2. 10-digit Unix epoch seconds (e.g. 1794146650 uploaded by ESP32) -> multiply by 1000
-  // 3. Firestore Timestamp objects (.toMillis(), .toDate())
-  // 4. ISO Date + Time strings
   let timestampNum = Date.now();
   if (typeof rawRecord?.timestamp === 'number') {
     if (rawRecord.timestamp > 1500000000000) {
@@ -1701,7 +2202,9 @@ export function normalizeAttendanceRecord(
 
   return {
     ...(rawRecord || {}),
+    studentDbId,
     uid: rfidUID,
+    studentUID: rfidUID,
     rfidUID,
     studentRfid: rfidUID,
     authUid,
@@ -1714,6 +2217,15 @@ export function normalizeAttendanceRecord(
     time: recordTime,
     timestamp: timestampNum,
     status: (rawRecord?.status as any) || 'Present',
+    source:
+      rawRecord?.source ||
+      (rawRecord?.isOverridden
+        ? 'admin_override'
+        : rawRecord?.lastModifiedBy
+        ? 'admin_edit'
+        : rawRecord?.device && /manual|admin/i.test(rawRecord.device)
+        ? 'admin_manual'
+        : 'rfid_scanner'),
     device: rawRecord?.device || rawRecord?.readerDevice || 'ESP32-RFID-01',
     notes: rawRecord?.notes || '',
   };
@@ -1722,6 +2234,7 @@ export function normalizeAttendanceRecord(
 export interface CentralAttendanceUserTarget {
   role: UserRole;
   uid: string;
+  studentDbId?: string;
   studentId?: string;
   rollNumber?: string;
   rfidUID?: string;
@@ -1731,7 +2244,8 @@ export interface CentralAttendanceUserTarget {
 
 /**
  * Unified Attendance Subscription for Admin and Student Portals.
- * Single Source of Truth: students/{RFID_UID}/attendance/{YYYY-MM-DD} + working_days/{YYYY-MM-DD}.
+ * Admin: subscribes to /students.
+ * Student: subscribes strictly to /students/{studentDbId} + /working_days.
  */
 export function subscribeToCentralAttendance(
   user: CentralAttendanceUserTarget,
@@ -1744,13 +2258,6 @@ export function subscribeToCentralAttendance(
   const unsubs: (() => void)[] = [];
   const db = getFirebaseDatabase();
 
-  const resolved = lookupStudentInfo(user.rfidUID || '') ||
-                   lookupStudentInfo(user.studentId || user.rollNumber || '') ||
-                   lookupStudentInfo(user.uid) ||
-                   (user.email ? lookupStudentInfo(user.email) : null);
-
-  const studentRfid = (user.rfidUID || resolved?.rfidUID || '').trim().toUpperCase();
-
   if (user.role === 'admin') {
     const unsubStudents = subscribeToStudents(
       (studentsMap) => {
@@ -1759,27 +2266,30 @@ export function subscribeToCentralAttendance(
         const todayMap: Record<string, AttendanceRecord> = {};
         const discoveredDates = new Set<string>();
 
-        Object.entries(studentsMap || {}).forEach(([rfidKey, st]) => {
+        Object.entries(studentsMap || {}).forEach(([dbKey, st]) => {
           if (!st || !st.attendance) return;
-          const cardUid = (st.uid || rfidKey).trim().toUpperCase();
+          const studentDbId = (st.studentDbId || dbKey).trim();
+          const cardUid = (st.rfidUID || st.uid || dbKey).trim().toUpperCase();
           Object.entries(st.attendance).forEach(([dateKey, rawRec]) => {
             if (!rawRec || rawRec.isDeleted) return;
             discoveredDates.add(dateKey);
             const rec = normalizeAttendanceRecord(
               {
                 ...rawRec,
+                studentDbId,
                 studentName: rawRec.studentName || st.name,
                 studentId: rawRec.studentId || st.studentId,
                 department: rawRec.department || st.department,
                 authUid: rawRec.authUid || st.authUid,
               },
               dateKey,
-              cardUid
+              cardUid,
+              studentDbId
             );
             if (!allMap[dateKey]) allMap[dateKey] = {};
-            allMap[dateKey][cardUid] = rec;
+            allMap[dateKey][studentDbId] = rec;
             if (dateKey === istToday) {
-              todayMap[cardUid] = rec;
+              todayMap[studentDbId] = rec;
             }
           });
         });
@@ -1797,7 +2307,19 @@ export function subscribeToCentralAttendance(
     );
     unsubs.push(unsubStudents);
   } else {
-    // STUDENT: Listen strictly to own node students/{studentRfid} + shared working_days
+    const studentDbId = (user.studentDbId || user.rfidUID || '').trim();
+    const fallbackRfid = (user.rfidUID || studentDbId).trim().toUpperCase();
+
+    if (!studentDbId) {
+      onError?.(
+        new AuthProfileError(
+          'mapping_missing',
+          'Student Database ID mapping missing for your account. Contact Administrator.'
+        )
+      );
+      return () => {};
+    }
+
     let currentStudentData: Student | null = null;
     let currentWorkingDays: Record<string, WorkingDayConfig> = {};
 
@@ -1806,13 +2328,17 @@ export function subscribeToCentralAttendance(
       const personalMap: Record<string, Record<string, AttendanceRecord>> = {};
       const todayMap: Record<string, AttendanceRecord> = {};
 
-      // Seed institutional working dates from working_days so denominator matches Admin Portal
       Object.keys(currentWorkingDays || {}).forEach((d) => {
         if (!currentWorkingDays[d]?.isHoliday && d <= istToday) {
           personalMap[d] = {};
         }
       });
 
+      const activeRfid = (
+        currentStudentData?.rfidUID ||
+        currentStudentData?.uid ||
+        fallbackRfid
+      ).trim().toUpperCase();
       const attObj = currentStudentData?.attendance || {};
 
       Object.entries(attObj).forEach(([dateKey, rawRec]) => {
@@ -1820,42 +2346,68 @@ export function subscribeToCentralAttendance(
         const rec = normalizeAttendanceRecord(
           {
             ...rawRec,
+            studentDbId,
             studentName: rawRec.studentName || currentStudentData?.name || user.displayName,
             studentId: rawRec.studentId || currentStudentData?.studentId || user.studentId,
             department: rawRec.department || currentStudentData?.department,
             authUid: rawRec.authUid || currentStudentData?.authUid || user.uid,
           },
           dateKey,
-          studentRfid
+          activeRfid,
+          studentDbId
         );
 
         if (!personalMap[dateKey]) personalMap[dateKey] = {};
-        personalMap[dateKey][studentRfid] = rec;
+        personalMap[dateKey][studentDbId] = rec;
 
-        // Strictly only place today's IST attendance into todayMap
         if (dateKey === istToday) {
-          todayMap[studentRfid] = rec;
+          todayMap[studentDbId] = rec;
         }
       });
 
       onAttendanceUpdate(personalMap, todayMap);
     };
 
-    if (studentRfid) {
-      const studentNodeRef = ref(db, `students/${studentRfid}`);
-      const unsubStudent = onValue(
-        studentNodeRef,
-        (snap: DataSnapshot) => {
-          currentStudentData = snap.exists() ? (snap.val() as Student) : null;
+    const studentNodeRef = ref(db, `students/${studentDbId}`);
+    const unsubStudent = onValue(
+      studentNodeRef,
+      (snap: DataSnapshot) => {
+        if (!snap.exists()) {
+          currentStudentData = null;
+          onError?.(
+            new AuthProfileError(
+              'not_registered',
+              `Student record not found at /students/${studentDbId}.`
+            )
+          );
           emitStudentState();
-        },
-        (err) => {
-          console.warn(`Student unified node listener notice (students/${studentRfid}):`, err?.message);
-          onError?.(err);
+          return;
         }
-      );
-      unsubs.push(() => off(studentNodeRef, 'value', unsubStudent));
-    }
+        const val = snap.val() as Student;
+        const activeRfid = (val.rfidUID || val.uid || fallbackRfid).trim().toUpperCase();
+        const normalizedStudent: Student = {
+          ...val,
+          studentDbId,
+          rfidUID: activeRfid,
+          uid: activeRfid,
+        };
+        cachedStudentsMap[studentDbId] = normalizedStudent;
+        currentStudentData = normalizedStudent;
+        emitStudentState();
+      },
+      (err) => {
+        console.warn(`Student unified node listener error (students/${studentDbId}):`, err?.message);
+        onError?.(
+          new RtdbOperationError(
+            'ON_VALUE',
+            `/students/${studentDbId}`,
+            (err as any)?.code || 'PERMISSION_DENIED',
+            err?.message || 'Permission denied reading student node'
+          )
+        );
+      }
+    );
+    unsubs.push(() => off(studentNodeRef, 'value', unsubStudent));
 
     const unsubWorkingDays = subscribeToWorkingDays(
       (wd) => {
@@ -1879,7 +2431,7 @@ export function subscribeToCentralAttendance(
 }
 
 /**
- * Direct on-demand re-fetch from Firebase Unified Students Tree (students/{RFID_UID}/attendance/{DATE}).
+ * Direct on-demand re-fetch from Firebase Unified Students Tree (students/{studentDbId}/attendance/{DATE}).
  */
 export async function fetchDirectAttendance(
   user: CentralAttendanceUserTarget
@@ -1892,13 +2444,8 @@ export async function fetchDirectAttendance(
 }> {
   const db = getFirebaseDatabase();
   const istToday = getISTDateStr();
-
-  const resolved = lookupStudentInfo(user.rfidUID || '') ||
-                   lookupStudentInfo(user.studentId || user.rollNumber || '') ||
-                   lookupStudentInfo(user.uid) ||
-                   (user.email ? lookupStudentInfo(user.email) : null);
-
-  const studentRfid = (user.rfidUID || resolved?.rfidUID || '').trim().toUpperCase();
+  const studentDbId = (user.studentDbId || user.rfidUID || '').trim();
+  const fallbackRfid = (user.rfidUID || studentDbId).trim().toUpperCase();
 
   const allMap: Record<string, Record<string, AttendanceRecord>> = {};
   const todayMap: Record<string, AttendanceRecord> = {};
@@ -1914,66 +2461,89 @@ export async function fetchDirectAttendance(
   } catch {}
 
   if (user.role === 'admin') {
-    const snap = await withTimeout(get(ref(db, 'students')), 4500, null);
-    if (snap && snap.exists && snap.exists()) {
+    const snap = await runRtdbOp('GET', '/students', () =>
+      withTimeoutReject(get(ref(db, 'students')), 6000, 'Timed out reading /students')
+    );
+    if (snap.exists()) {
       const studentsMap = snap.val() as Record<string, Student>;
-      Object.entries(studentsMap).forEach(([rfidKey, st]) => {
+      Object.entries(studentsMap).forEach(([dbKey, st]) => {
         if (!st || !st.attendance) return;
-        const cardUid = (st.uid || rfidKey).trim().toUpperCase();
+        const resolvedDbId = (st.studentDbId || dbKey).trim();
+        const cardUid = (st.rfidUID || st.uid || dbKey).trim().toUpperCase();
         Object.entries(st.attendance).forEach(([dateKey, rawRec]) => {
           if (!rawRec || rawRec.isDeleted) return;
           const rec = normalizeAttendanceRecord(
             {
               ...rawRec,
+              studentDbId: resolvedDbId,
               studentName: rawRec.studentName || st.name,
               studentId: rawRec.studentId || st.studentId,
               department: rawRec.department || st.department,
               authUid: rawRec.authUid || st.authUid,
             },
             dateKey,
-            cardUid
+            cardUid,
+            resolvedDbId
           );
           if (!allMap[dateKey]) allMap[dateKey] = {};
-          allMap[dateKey][cardUid] = rec;
+          allMap[dateKey][resolvedDbId] = rec;
           recordCount++;
           if (dateKey === istToday) {
-            todayMap[cardUid] = rec;
+            todayMap[resolvedDbId] = rec;
           }
         });
       });
     }
-  } else if (studentRfid) {
+  } else {
+    if (!studentDbId) {
+      throw new AuthProfileError(
+        'mapping_missing',
+        'Student Database ID mapping is missing for your account.'
+      );
+    }
+
     Object.keys(workingDays).forEach((d) => {
       if (!workingDays[d]?.isHoliday && d <= istToday) {
         allMap[d] = {};
       }
     });
 
-    const snap = await withTimeout(get(ref(db, `students/${studentRfid}`)), 4500, null);
-    if (snap && snap.exists && snap.exists()) {
-      studentNode = snap.val() as Student;
-      const attObj = studentNode.attendance || {};
-      Object.entries(attObj).forEach(([dateKey, rawRec]) => {
-        if (!rawRec || rawRec.isDeleted) return;
-        const rec = normalizeAttendanceRecord(
-          {
-            ...rawRec,
-            studentName: rawRec.studentName || studentNode?.name,
-            studentId: rawRec.studentId || studentNode?.studentId,
-            department: rawRec.department || studentNode?.department,
-            authUid: rawRec.authUid || studentNode?.authUid || user.uid,
-          },
-          dateKey,
-          studentRfid
-        );
-        if (!allMap[dateKey]) allMap[dateKey] = {};
-        allMap[dateKey][studentRfid] = rec;
-        recordCount++;
-        if (dateKey === istToday) {
-          todayMap[studentRfid] = rec;
-        }
-      });
+    const snap = await runRtdbOp('GET', `/students/${studentDbId}`, () =>
+      withTimeoutReject(get(ref(db, `students/${studentDbId}`)), 6000, `Timed out reading /students/${studentDbId}`)
+    );
+    if (!snap.exists()) {
+      throw new AuthProfileError(
+        'not_registered',
+        `Student profile not found at /students/${studentDbId}.`
+      );
     }
+    const rawNode = snap.val() as Student;
+    const cardUid = (rawNode.rfidUID || rawNode.uid || fallbackRfid).trim().toUpperCase();
+    studentNode = { ...rawNode, studentDbId, rfidUID: cardUid, uid: cardUid };
+    cachedStudentsMap[studentDbId] = studentNode;
+    const attObj = studentNode.attendance || {};
+    Object.entries(attObj).forEach(([dateKey, rawRec]) => {
+      if (!rawRec || rawRec.isDeleted) return;
+      const rec = normalizeAttendanceRecord(
+        {
+          ...rawRec,
+          studentDbId,
+          studentName: rawRec.studentName || studentNode?.name,
+          studentId: rawRec.studentId || studentNode?.studentId,
+          department: rawRec.department || studentNode?.department,
+          authUid: rawRec.authUid || studentNode?.authUid || user.uid,
+        },
+        dateKey,
+        cardUid,
+        studentDbId
+      );
+      if (!allMap[dateKey]) allMap[dateKey] = {};
+      allMap[dateKey][studentDbId] = rec;
+      recordCount++;
+      if (dateKey === istToday) {
+        todayMap[studentDbId] = rec;
+      }
+    });
   }
 
   return {
@@ -1992,23 +2562,27 @@ export function subscribeToStudentAttendance(
   target: StudentSubscriptionTarget | string,
   onUpdate: (records: AttendanceRecord[]) => void
 ): () => void {
-  const upperRfid = (typeof target === 'string' ? target : target.rfidUID).trim().toUpperCase();
-  let authUid = typeof target === 'object' ? target.authUid : undefined;
-  let studentId = typeof target === 'object' ? target.studentId : undefined;
+  const rawIdentifier = typeof target === 'string' ? target : (target.studentDbId || target.rfidUID);
+  const info = lookupStudentInfo(rawIdentifier) ||
+    (typeof target === 'object' ? (lookupStudentInfo(target.rfidUID) || lookupStudentInfo(target.studentId || '') || lookupStudentInfo(target.authUid || '')) : null);
 
-  const info = lookupStudentInfo(upperRfid) || lookupStudentInfo(studentId || '') || lookupStudentInfo(authUid || '');
-  if (info) {
-    if (!authUid) authUid = info.authUid;
-    if (!studentId) studentId = info.studentId;
-  }
+  const studentDbId = (
+    (typeof target === 'object' ? target.studentDbId : undefined) ||
+    info?.studentDbId ||
+    (typeof target === 'string' ? target : target.rfidUID)
+  ).trim();
+  const upperRfid = ((typeof target === 'string' ? target : target.rfidUID) || info?.rfidUID || '').trim().toUpperCase();
+  const authUid = (typeof target === 'object' ? target.authUid : undefined) || info?.authUid || '';
+  const studentId = (typeof target === 'object' ? target.studentId : undefined) || info?.studentId || '';
 
   return subscribeToCentralAttendance(
     {
       role: 'student',
-      uid: authUid || '',
+      uid: authUid,
+      studentDbId,
       rfidUID: upperRfid,
-      studentId: studentId || '',
-      rollNumber: studentId || '',
+      studentId,
+      rollNumber: studentId,
     },
     (allAttendance) => {
       const allRecords: AttendanceRecord[] = [];
@@ -2026,17 +2600,19 @@ export function subscribeToStudentAttendance(
 }
 
 /**
- * Subscribe to today's attendance record for a specific student at students/{RFID_UID}/attendance/{DATE}
+ * Subscribe to today's attendance record for a specific student at students/{studentDbId}/attendance/{DATE}
  */
 export function subscribeToStudentTodayAttendance(
   dateStr: string,
-  rfidUID: string,
+  studentDbIdOrRfid: string,
   onUpdate: (record: AttendanceRecord | null) => void
 ): () => void {
   try {
     const db = getFirebaseDatabase();
-    const upperRfid = rfidUID.trim().toUpperCase();
-    const todayRecordRef = ref(db, `students/${upperRfid}/attendance/${dateStr}`);
+    const info = lookupStudentInfo(studentDbIdOrRfid);
+    const dbKey = (info?.studentDbId || studentDbIdOrRfid).trim();
+    const cardUid = (info?.rfidUID || studentDbIdOrRfid).trim().toUpperCase();
+    const todayRecordRef = ref(db, `students/${dbKey}/attendance/${dateStr}`);
 
     const unsubscribe = onValue(
       todayRecordRef,
@@ -2044,7 +2620,7 @@ export function subscribeToStudentTodayAttendance(
         if (snapshot.exists()) {
           const val = snapshot.val();
           if (val && !val.isDeleted) {
-            onUpdate(normalizeAttendanceRecord(val, dateStr, upperRfid));
+            onUpdate(normalizeAttendanceRecord(val, dateStr, cardUid, dbKey));
             return;
           }
         }
@@ -2105,11 +2681,14 @@ export async function completeSystemReset(
       }
     }
 
-    // 2. Clear auxiliary nodes
+    // 2. Clear auxiliary nodes & identity indexes
     try { await remove(ref(db, 'working_days')); } catch {}
     try { await remove(ref(db, 'attendance_trash')); } catch {}
     try { await remove(ref(db, 'suspensions')); } catch {}
     try { await remove(ref(db, 'unknown_scans')); } catch {}
+    try { await remove(ref(db, 'rfid_to_student')); } catch {}
+    try { await remove(ref(db, 'rfid_to_uid')); } catch {}
+    try { await remove(ref(db, 'auth_to_student')); } catch {}
 
     // 3. Send reset command to ESP32 via deviceCommands/esp32
     const deviceCmd: DeviceCommand = {
@@ -2332,7 +2911,43 @@ export function subscribeToSuspensions(
 }
 
 /**
- * Edit an attendance record's date, time, status, or notes at students/{RFID_UID}/attendance/{DATE}.
+ * Subscribe in real-time to a single student's suspension history at /suspensions/{studentDbId}
+ */
+export function subscribeToStudentSuspensions(
+  studentDbIdOrRfid: string,
+  onUpdate: (list: StudentSuspension[]) => void,
+  onError?: (err: Error) => void
+): () => void {
+  const raw = studentDbIdOrRfid.trim();
+  if (!raw) return () => {};
+  const info = lookupStudentInfo(raw);
+  const dbKey = (info?.studentDbId || raw).trim();
+  try {
+    const db = getFirebaseDatabase();
+    const suspRef = ref(db, `suspensions/${dbKey}`);
+    const unsubscribe = onValue(
+      suspRef,
+      (snap) => {
+        if (!snap.exists()) {
+          onUpdate([]);
+          return;
+        }
+        const val = snap.val() as Record<string, StudentSuspension>;
+        const list = Object.values(val || {}).sort((a, b) => b.createdAt - a.createdAt);
+        onUpdate(list);
+      },
+      (err) => {
+        onError?.(err);
+      }
+    );
+    return () => off(suspRef, 'value', unsubscribe);
+  } catch {
+    return () => {};
+  }
+}
+
+/**
+ * Edit an attendance record's date, time, status, or notes at students/{studentDbId}/attendance/{DATE}.
  * Preserves edit history and creates an audit entry.
  */
 export async function updateAttendanceRecord(
@@ -2349,12 +2964,14 @@ export async function updateAttendanceRecord(
   adminUser: { email?: string | null; uid?: string }
 ): Promise<{ success: boolean; updatedRecord: AttendanceRecord; previousRecord: AttendanceRecord }> {
   const db = getFirebaseDatabase();
-  const uid = uidInput.trim().toUpperCase();
-  const oldRef = ref(db, `students/${uid}/attendance/${date}`);
+  const resolved = await resolveStudentByAnyId(uidInput);
+  const studentDbId = resolved?.studentDbId || uidInput.trim();
+  const cardUid = (resolved?.rfidUID || uidInput).trim().toUpperCase();
+  const oldRef = ref(db, `students/${studentDbId}/attendance/${date}`);
   const snap = await get(oldRef);
 
   if (!snap.exists()) {
-    throw new Error(`Record for student ${uid} on ${date} not found.`);
+    throw new Error(`Record for student ${uidInput} on ${date} not found.`);
   }
 
   const existing = snap.val() as AttendanceRecord;
@@ -2374,14 +2991,18 @@ export async function updateAttendanceRecord(
     },
   });
 
+  const resolvedCardUid = (resolved?.rfidUID || existing.rfidUID || existing.uid || cardUid).trim().toUpperCase();
   const updatedRecord: AttendanceRecord = stripUndefinedDeep({
     ...existing,
-    uid,
-    rfidUID: uid,
-    studentRfid: uid,
+    studentDbId,
+    uid: resolvedCardUid,
+    studentUID: resolvedCardUid,
+    rfidUID: resolvedCardUid,
+    studentRfid: resolvedCardUid,
     date: targetDate,
     time: updates.time || existing.time,
     status: updates.status || existing.status,
+    source: 'admin_edit',
     notes: updates.notes !== undefined ? updates.notes : (existing.notes || ''),
     device: updates.device || existing.device || 'ADMIN-EDIT',
     lastModifiedBy: adminUser.email || 'admin',
@@ -2395,16 +3016,18 @@ export async function updateAttendanceRecord(
   }
 
   if (targetDate !== date) {
-    await remove(oldRef);
-    await set(ref(db, `students/${uid}/attendance/${targetDate}`), updatedRecord);
+    await runRtdbOp('REMOVE', `/students/${studentDbId}/attendance/${date}`, () => remove(oldRef));
+    await runRtdbOp('SET', `/students/${studentDbId}/attendance/${targetDate}`, () =>
+      set(ref(db, `students/${studentDbId}/attendance/${targetDate}`), updatedRecord)
+    );
   } else {
-    await set(oldRef, updatedRecord);
+    await runRtdbOp('SET', `/students/${studentDbId}/attendance/${date}`, () => set(oldRef, updatedRecord));
   }
 
   await syncWorkingDaysFromDates([targetDate]);
 
   await logAuditActivity('EDIT_ATTENDANCE', adminUser, {
-    studentRfid: uid,
+    studentRfid: resolvedCardUid,
     studentName: existing.studentName,
     studentId: existing.studentId,
     date: targetDate,
@@ -2436,33 +3059,40 @@ export async function deleteAttendanceRecord(
   adminUser: { email?: string | null; uid?: string }
 ): Promise<{ success: boolean; deletedRecord: AttendanceRecord; trashId: string }> {
   const db = getFirebaseDatabase();
-  const uid = uidInput.trim().toUpperCase();
-  const targetRef = ref(db, `students/${uid}/attendance/${date}`);
+  const resolved = await resolveStudentByAnyId(uidInput);
+  const studentDbId = resolved?.studentDbId || uidInput.trim();
+  const cardUid = (resolved?.rfidUID || uidInput).trim().toUpperCase();
+  const targetRef = ref(db, `students/${studentDbId}/attendance/${date}`);
   const snap = await get(targetRef);
 
   if (!snap.exists()) {
-    throw new Error(`Record for student ${uid} on ${date} not found.`);
+    throw new Error(`Record for student ${uidInput} on ${date} not found.`);
   }
 
   const existing = snap.val() as AttendanceRecord;
-  const trashId = `${date}_${uid}`;
+  const resolvedCardUid = (resolved?.rfidUID || existing.rfidUID || existing.uid || cardUid).trim().toUpperCase();
+  const trashId = `${date}_${studentDbId}`;
 
   const trashEntry: TrashAttendanceRecord = stripUndefinedDeep({
     ...existing,
-    uid,
+    studentDbId,
+    uid: resolvedCardUid,
+    rfidUID: resolvedCardUid,
     trashId,
     deletedAt: Date.now(),
     deletedBy: adminUser.email || 'admin',
     deleteReason: reason || 'Deleted by administrator',
-    originalPath: `students/${uid}/attendance/${date}`,
+    originalPath: `students/${studentDbId}/attendance/${date}`,
     isDeleted: true,
   });
 
-  await set(ref(db, `attendance_trash/${trashId}`), trashEntry);
-  await remove(targetRef);
+  await runRtdbOp('SET', `/attendance_trash/${trashId}`, () =>
+    set(ref(db, `attendance_trash/${trashId}`), trashEntry)
+  );
+  await runRtdbOp('REMOVE', `/students/${studentDbId}/attendance/${date}`, () => remove(targetRef));
 
   await logAuditActivity('DELETE_ATTENDANCE', adminUser, {
-    studentRfid: uid,
+    studentRfid: resolvedCardUid,
     studentName: existing.studentName,
     studentId: existing.studentId,
     date,
@@ -2470,14 +3100,14 @@ export async function deleteAttendanceRecord(
     previousValues: existing,
   });
 
-  return { success: true, deletedRecord: existing, trashId };
+  return { success: true, deletedRecord: { ...existing, studentDbId }, trashId };
 }
 
 /**
  * Bulk delete multiple attendance records with soft-delete archiving.
  */
 export async function bulkDeleteAttendance(
-  records: Array<{ date: string; uid: string; studentName?: string }>,
+  records: Array<{ date: string; uid: string; studentDbId?: string; studentName?: string }>,
   reason: string,
   adminUser: { email?: string | null; uid?: string }
 ): Promise<{ success: boolean; count: number; deletedRecords: AttendanceRecord[] }> {
@@ -2485,31 +3115,36 @@ export async function bulkDeleteAttendance(
   const deletedRecords: AttendanceRecord[] = [];
 
   for (const r of records) {
-    const cleanUid = r.uid.trim().toUpperCase();
+    const resolved = await resolveStudentByAnyId(r.studentDbId || r.uid);
+    const studentDbId = resolved?.studentDbId || (r.studentDbId || r.uid).trim();
+    const cardUid = (resolved?.rfidUID || r.uid).trim().toUpperCase();
     try {
-      const targetRef = ref(db, `students/${cleanUid}/attendance/${r.date}`);
+      const targetRef = ref(db, `students/${studentDbId}/attendance/${r.date}`);
       const snap = await get(targetRef);
       if (snap.exists()) {
         const existing = snap.val() as AttendanceRecord;
-        const trashId = `${r.date}_${cleanUid}`;
+        const resolvedCardUid = (resolved?.rfidUID || existing.rfidUID || existing.uid || cardUid).trim().toUpperCase();
+        const trashId = `${r.date}_${studentDbId}`;
         const trashEntry: TrashAttendanceRecord = stripUndefinedDeep({
           ...existing,
-          uid: cleanUid,
+          studentDbId,
+          uid: resolvedCardUid,
+          rfidUID: resolvedCardUid,
           trashId,
           deletedAt: Date.now(),
           deletedBy: adminUser.email || 'admin',
           deleteReason: reason || 'Bulk deletion by administrator',
-          originalPath: `students/${cleanUid}/attendance/${r.date}`,
+          originalPath: `students/${studentDbId}/attendance/${r.date}`,
           isDeleted: true,
         });
 
         await set(ref(db, `attendance_trash/${trashId}`), trashEntry);
         await remove(targetRef);
 
-        deletedRecords.push(existing);
+        deletedRecords.push({ ...existing, studentDbId });
       }
     } catch (err) {
-      console.warn(`Failed deleting record students/${cleanUid}/attendance/${r.date}:`, err);
+      console.warn(`Failed deleting record students/${studentDbId}/attendance/${r.date}:`, err);
     }
   }
 
@@ -2517,7 +3152,7 @@ export async function bulkDeleteAttendance(
     reason,
     affectedCount: deletedRecords.length,
     details: `Bulk deleted ${deletedRecords.length} attendance records`,
-    previousValues: deletedRecords.map((d) => ({ date: d.date, uid: d.uid, name: d.studentName })),
+    previousValues: deletedRecords.map((d) => ({ date: d.date, uid: d.uid, studentDbId: d.studentDbId, name: d.studentName })),
   });
 
   return { success: true, count: deletedRecords.length, deletedRecords };
@@ -2527,22 +3162,25 @@ export async function bulkDeleteAttendance(
  * Bulk update attendance status for multiple records.
  */
 export async function bulkUpdateAttendanceStatus(
-  records: Array<{ date: string; uid: string; studentName?: string }>,
+  records: Array<{ date: string; uid: string; studentDbId?: string; studentName?: string }>,
   newStatus: AttendanceStatus,
   reason: string,
   adminUser: { email?: string | null; uid?: string }
-): Promise<{ success: boolean; count: number; previousStates: Array<{ date: string; uid: string; prevStatus: AttendanceStatus }> }> {
+): Promise<{ success: boolean; count: number; previousStates: Array<{ date: string; uid: string; studentDbId: string; prevStatus: AttendanceStatus }> }> {
   const db = getFirebaseDatabase();
-  const previousStates: Array<{ date: string; uid: string; prevStatus: AttendanceStatus }> = [];
+  const previousStates: Array<{ date: string; uid: string; studentDbId: string; prevStatus: AttendanceStatus }> = [];
 
   for (const r of records) {
-    const cleanUid = r.uid.trim().toUpperCase();
+    const resolved = await resolveStudentByAnyId(r.studentDbId || r.uid);
+    const studentDbId = resolved?.studentDbId || (r.studentDbId || r.uid).trim();
+    const cardUid = (resolved?.rfidUID || r.uid).trim().toUpperCase();
     try {
-      const targetRef = ref(db, `students/${cleanUid}/attendance/${r.date}`);
+      const targetRef = ref(db, `students/${studentDbId}/attendance/${r.date}`);
       const snap = await get(targetRef);
       if (snap.exists()) {
         const existing = snap.val() as AttendanceRecord;
-        previousStates.push({ date: r.date, uid: cleanUid, prevStatus: existing.status });
+        const resolvedCardUid = (resolved?.rfidUID || existing.rfidUID || existing.uid || cardUid).trim().toUpperCase();
+        previousStates.push({ date: r.date, uid: resolvedCardUid, studentDbId, prevStatus: existing.status });
 
         const prevEdits = existing.previousEdits || [];
         prevEdits.unshift({
@@ -2560,8 +3198,12 @@ export async function bulkUpdateAttendanceStatus(
 
         const updated: AttendanceRecord = stripUndefinedDeep({
           ...existing,
-          uid: cleanUid,
+          studentDbId,
+          uid: resolvedCardUid,
+          studentUID: resolvedCardUid,
+          rfidUID: resolvedCardUid,
           status: newStatus,
+          source: 'admin_edit',
           lastModifiedBy: adminUser.email || 'admin',
           lastModifiedAt: Date.now(),
           previousEdits: prevEdits,
@@ -2570,7 +3212,7 @@ export async function bulkUpdateAttendanceStatus(
         await set(targetRef, updated);
       }
     } catch (err) {
-      console.warn(`Failed bulk updating students/${cleanUid}/attendance/${r.date}:`, err);
+      console.warn(`Failed bulk updating students/${studentDbId}/attendance/${r.date}:`, err);
     }
   }
 
@@ -2586,7 +3228,7 @@ export async function bulkUpdateAttendanceStatus(
 }
 
 /**
- * Restore an attendance record from attendance_trash back into students/{RFID_UID}/attendance/{DATE}.
+ * Restore an attendance record from attendance_trash back into students/{studentDbId}/attendance/{DATE}.
  */
 export async function restoreDeletedAttendance(
   trashId: string,
@@ -2602,9 +3244,10 @@ export async function restoreDeletedAttendance(
 
   const trashEntry = snap.val() as TrashAttendanceRecord;
   const date = trashEntry.date;
-  const uid = (trashEntry.rfidUID || trashEntry.uid).toUpperCase();
+  const resolved = await resolveStudentByAnyId(trashEntry.studentDbId || trashEntry.rfidUID || trashEntry.uid);
+  const studentDbId = resolved?.studentDbId || trashEntry.studentDbId || (trashEntry.rfidUID || trashEntry.uid).toUpperCase();
+  const uid = (resolved?.rfidUID || trashEntry.rfidUID || trashEntry.uid).toUpperCase();
 
-  // Omit trash-only & deleted metadata cleanly instead of passing undefined to RTDB set()
   const {
     trashId: _tid,
     originalPath: _op,
@@ -2616,8 +3259,11 @@ export async function restoreDeletedAttendance(
 
   const restoredRecord: AttendanceRecord = stripUndefinedDeep({
     ...baseFields,
+    studentDbId,
     uid,
+    studentUID: uid,
     rfidUID: uid,
+    source: baseFields.source || 'admin_restore',
     isDeleted: false,
     lastModifiedBy: adminUser.email || 'admin',
     lastModifiedAt: Date.now(),
@@ -2628,7 +3274,7 @@ export async function restoreDeletedAttendance(
     throw new Error(`Cannot restore invalid record: ${validationError}`);
   }
 
-  await set(ref(db, `students/${uid}/attendance/${date}`), restoredRecord);
+  await set(ref(db, `students/${studentDbId}/attendance/${date}`), restoredRecord);
   await syncWorkingDaysFromDates([date]);
   await remove(trashRef);
 
@@ -2654,12 +3300,13 @@ export async function restorePreviousAttendance(
   adminUser: { email?: string | null; uid?: string }
 ): Promise<{ success: boolean; restoredRecord: AttendanceRecord }> {
   const db = getFirebaseDatabase();
-  const uid = uidInput.trim().toUpperCase();
-  const targetRef = ref(db, `students/${uid}/attendance/${date}`);
+  const resolved = await resolveStudentByAnyId(uidInput);
+  const studentDbId = resolved?.studentDbId || uidInput.trim();
+  const targetRef = ref(db, `students/${studentDbId}/attendance/${date}`);
   const snap = await get(targetRef);
 
   if (!snap.exists()) {
-    throw new Error(`Record ${uid}/attendance/${date} not found.`);
+    throw new Error(`Record ${uidInput}/attendance/${date} not found.`);
   }
 
   const existing = snap.val() as AttendanceRecord;
@@ -2671,8 +3318,12 @@ export async function restorePreviousAttendance(
   }
 
   const prevData = targetVersion.prevData;
+  const cardUid = (resolved?.rfidUID || existing.rfidUID || existing.uid || uidInput).trim().toUpperCase();
   const updatedRecord: AttendanceRecord = stripUndefinedDeep({
     ...existing,
+    studentDbId,
+    uid: cardUid,
+    rfidUID: cardUid,
     date: prevData.date,
     time: prevData.time,
     status: prevData.status,
@@ -2685,7 +3336,7 @@ export async function restorePreviousAttendance(
   await set(targetRef, updatedRecord);
 
   await logAuditActivity('RESTORE_ATTENDANCE', adminUser, {
-    studentRfid: uid,
+    studentRfid: cardUid,
     studentName: existing.studentName,
     studentId: existing.studentId,
     date,
@@ -2698,7 +3349,7 @@ export async function restorePreviousAttendance(
 }
 
 /**
- * Override student's status to Absent (Manual Override) at students/{RFID_UID}/attendance/{DATE}.
+ * Override student's status to Absent (Manual Override) at students/{studentDbId}/attendance/{DATE}.
  * Preserves original scan data and prevents subsequent ESP32 RFID scans from overriding it for that date.
  */
 export async function overrideAttendanceToAbsent(
@@ -2708,15 +3359,17 @@ export async function overrideAttendanceToAbsent(
   adminUser: { email?: string | null; uid?: string }
 ): Promise<{ success: boolean; updatedRecord: AttendanceRecord; previousRecord: AttendanceRecord }> {
   const db = getFirebaseDatabase();
-  const uid = uidInput.trim().toUpperCase();
-  const targetRef = ref(db, `students/${uid}/attendance/${date}`);
+  const resolved = await resolveStudentByAnyId(uidInput);
+  const studentDbId = resolved?.studentDbId || uidInput.trim();
+  const targetRef = ref(db, `students/${studentDbId}/attendance/${date}`);
   const snap = await get(targetRef);
 
   if (!snap.exists()) {
-    throw new Error(`Attendance record for ${uid} on ${date} not found.`);
+    throw new Error(`Attendance record for ${uidInput} on ${date} not found.`);
   }
 
   const existing = snap.val() as AttendanceRecord;
+  const cardUid = (resolved?.rfidUID || existing.rfidUID || existing.uid || uidInput).trim().toUpperCase();
   const originalRecord = existing.originalRecord || {
     status: existing.status,
     time: existing.time,
@@ -2726,8 +3379,12 @@ export async function overrideAttendanceToAbsent(
 
   const updatedRecord: AttendanceRecord = stripUndefinedDeep({
     ...existing,
-    uid,
+    studentDbId,
+    uid: cardUid,
+    studentUID: cardUid,
+    rfidUID: cardUid,
     status: 'Absent',
+    source: 'admin_override',
     isOverridden: true,
     overrideReason: reason || 'Manual administrative override to Absent',
     overrideBy: adminUser.email || 'admin',
@@ -2737,10 +3394,10 @@ export async function overrideAttendanceToAbsent(
     lastModifiedAt: Date.now(),
   });
 
-  await set(targetRef, updatedRecord);
+  await runRtdbOp('SET', `/students/${studentDbId}/attendance/${date}`, () => set(targetRef, updatedRecord));
 
   await logAuditActivity('OVERRIDE_ATTENDANCE', adminUser, {
-    studentRfid: uid,
+    studentRfid: cardUid,
     studentName: existing.studentName,
     studentId: existing.studentId,
     date,
@@ -2761,15 +3418,17 @@ export async function removeAttendanceOverride(
   adminUser: { email?: string | null; uid?: string }
 ): Promise<{ success: boolean; updatedRecord: AttendanceRecord }> {
   const db = getFirebaseDatabase();
-  const uid = uidInput.trim().toUpperCase();
-  const targetRef = ref(db, `students/${uid}/attendance/${date}`);
+  const resolved = await resolveStudentByAnyId(uidInput);
+  const studentDbId = resolved?.studentDbId || uidInput.trim();
+  const targetRef = ref(db, `students/${studentDbId}/attendance/${date}`);
   const snap = await get(targetRef);
 
   if (!snap.exists()) {
-    throw new Error(`Record for ${uid} on ${date} not found.`);
+    throw new Error(`Record for ${uidInput} on ${date} not found.`);
   }
 
   const existing = snap.val() as AttendanceRecord;
+  const cardUid = (resolved?.rfidUID || existing.rfidUID || existing.uid || uidInput).trim().toUpperCase();
   const original = existing.originalRecord;
 
   const {
@@ -2781,18 +3440,22 @@ export async function removeAttendanceOverride(
 
   const updatedRecord: AttendanceRecord = stripUndefinedDeep({
     ...restFields,
-    uid,
+    studentDbId,
+    uid: cardUid,
+    studentUID: cardUid,
+    rfidUID: cardUid,
     status: original?.status || 'Present',
     time: original?.time || existing.time,
+    source: 'admin_override_removed',
     isOverridden: false,
     lastModifiedBy: adminUser.email || 'admin',
     lastModifiedAt: Date.now(),
   });
 
-  await set(targetRef, updatedRecord);
+  await runRtdbOp('SET', `/students/${studentDbId}/attendance/${date}`, () => set(targetRef, updatedRecord));
 
   await logAuditActivity('REMOVE_OVERRIDE', adminUser, {
-    studentRfid: uid,
+    studentRfid: cardUid,
     studentName: existing.studentName,
     studentId: existing.studentId,
     date,
@@ -2808,7 +3471,7 @@ export async function removeAttendanceOverride(
  * Suspended students are blocked from registering attendance via RFID.
  */
 export async function suspendStudent(
-  studentRfidInput: string,
+  studentIdOrRfid: string,
   duration: '1_day' | '1_week' | '1_month' | 'custom',
   startDate: string,
   endDate: string,
@@ -2816,22 +3479,18 @@ export async function suspendStudent(
   adminUser: { email?: string | null; uid?: string }
 ): Promise<{ success: boolean; suspension: StudentSuspension }> {
   const db = getFirebaseDatabase();
-  const rfid = studentRfidInput.trim().toUpperCase();
-  const info = lookupStudentInfo(rfid);
-
-  // Retrieve student record
-  let student: Student | null = null;
-  const studentSnap = await get(ref(db, `students/${rfid}`));
-  if (studentSnap.exists()) {
-    student = studentSnap.val();
-  }
+  const resolved = await resolveStudentByAnyId(studentIdOrRfid);
+  const studentDbId = resolved?.studentDbId || studentIdOrRfid.trim();
+  const student = resolved?.student || null;
+  const rfid = (resolved?.rfidUID || student?.rfidUID || student?.uid || studentIdOrRfid).trim().toUpperCase();
 
   const suspId = `susp_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
   const suspension: StudentSuspension = stripUndefinedDeep({
     id: suspId,
+    studentDbId,
     studentRfid: rfid,
-    studentName: student?.name || info?.name || 'Student',
-    studentId: student?.studentId || info?.studentId || 'N/A',
+    studentName: student?.name || 'Student',
+    studentId: student?.studentId || 'N/A',
     duration,
     startDate,
     endDate,
@@ -2841,11 +3500,11 @@ export async function suspendStudent(
     status: 'active',
   });
 
-  // 1. Record suspension in /suspensions/{rfid}/{suspId}
-  await set(ref(db, `suspensions/${rfid}/${suspId}`), suspension);
+  // 1. Record suspension in /suspensions/{studentDbId}/{suspId}
+  await set(ref(db, `suspensions/${studentDbId}/${suspId}`), suspension);
 
-  // 2. Update student status in /students/{rfid}
-  await update(ref(db, `students/${rfid}`), {
+  // 2. Update student status in /students/{studentDbId}
+  await update(ref(db, `students/${studentDbId}`), {
     status: 'suspended',
     isSuspended: true,
     activeSuspension: suspension,
@@ -2868,19 +3527,19 @@ export async function suspendStudent(
  * Manually unsuspend a student and re-enable RFID attendance scanning.
  */
 export async function unsuspendStudent(
-  studentRfidInput: string,
+  studentIdOrRfid: string,
   reason: string,
   adminUser: { email?: string | null; uid?: string }
 ): Promise<{ success: boolean }> {
   const db = getFirebaseDatabase();
-  const rfid = studentRfidInput.trim().toUpperCase();
-
-  const studentSnap = await get(ref(db, `students/${rfid}`));
-  const student = studentSnap.exists() ? (studentSnap.val() as Student) : null;
+  const resolved = await resolveStudentByAnyId(studentIdOrRfid);
+  const studentDbId = resolved?.studentDbId || studentIdOrRfid.trim();
+  const student = resolved?.student || null;
+  const rfid = (resolved?.rfidUID || student?.rfidUID || student?.uid || studentIdOrRfid).trim().toUpperCase();
   const activeSusp = student?.activeSuspension;
 
   // 1. Re-activate student
-  await update(ref(db, `students/${rfid}`), {
+  await update(ref(db, `students/${studentDbId}`), {
     status: 'active',
     isSuspended: false,
     activeSuspension: null,
@@ -2889,7 +3548,7 @@ export async function unsuspendStudent(
   // 2. Mark suspension revoked in history
   if (activeSusp && activeSusp.id) {
     try {
-      await update(ref(db, `suspensions/${rfid}/${activeSusp.id}`), {
+      await update(ref(db, `suspensions/${studentDbId}/${activeSusp.id}`), {
         status: 'revoked',
         revokedAt: Date.now(),
         revokedBy: adminUser.email || 'admin',
@@ -2922,17 +3581,17 @@ export async function checkAndReactivateExpiredSuspensions(): Promise<number> {
     if (!snap.exists()) return 0;
     const allStudents = snap.val() as Record<string, Student>;
 
-    for (const [rfid, st] of Object.entries(allStudents)) {
-      if (st.status === 'suspended' || st.isSuspended) {
+    for (const [dbKey, st] of Object.entries(allStudents)) {
+      if (st && (st.status === 'suspended' || st.isSuspended)) {
         const activeSusp = st.activeSuspension;
         if (activeSusp && activeSusp.endDate && nowStr > activeSusp.endDate) {
-          await update(ref(db, `students/${rfid}`), {
+          await update(ref(db, `students/${dbKey}`), {
             status: 'active',
             isSuspended: false,
             activeSuspension: null,
           });
           if (activeSusp.id) {
-            await update(ref(db, `suspensions/${rfid}/${activeSusp.id}`), {
+            await update(ref(db, `suspensions/${dbKey}/${activeSusp.id}`), {
               status: 'expired',
             });
           }
@@ -2947,7 +3606,7 @@ export async function checkAndReactivateExpiredSuspensions(): Promise<number> {
 }
 
 /**
- * Execute an undo action, restoring the previous state on students/{RFID_UID}/attendance/{DATE}.
+ * Execute an undo action, restoring the previous state on students/{studentDbId}/attendance/{DATE}.
  */
 export async function executeUndoAction(
   action: UndoAction,
@@ -2959,20 +3618,23 @@ export async function executeUndoAction(
     case 'EDIT': {
       const prevRec = action.revertData.previousRecord as AttendanceRecord;
       const curRec = action.revertData.updatedRecord as AttendanceRecord;
-      const cleanCurUid = (curRec.rfidUID || curRec.uid).toUpperCase();
-      const cleanPrevUid = (prevRec.rfidUID || prevRec.uid).toUpperCase();
-      if (curRec.date !== prevRec.date) {
-        await remove(ref(db, `students/${cleanCurUid}/attendance/${curRec.date}`));
+      const resolvedCur = await resolveStudentByAnyId(curRec.studentDbId || curRec.rfidUID || curRec.uid);
+      const resolvedPrev = await resolveStudentByAnyId(prevRec.studentDbId || prevRec.rfidUID || prevRec.uid);
+      const curDbId = resolvedCur?.studentDbId || curRec.studentDbId || (curRec.rfidUID || curRec.uid).toUpperCase();
+      const prevDbId = resolvedPrev?.studentDbId || prevRec.studentDbId || (prevRec.rfidUID || prevRec.uid).toUpperCase();
+      if (curRec.date !== prevRec.date || curDbId !== prevDbId) {
+        await remove(ref(db, `students/${curDbId}/attendance/${curRec.date}`));
       }
-      await set(ref(db, `students/${cleanPrevUid}/attendance/${prevRec.date}`), stripUndefinedDeep(prevRec));
+      await set(ref(db, `students/${prevDbId}/attendance/${prevRec.date}`), stripUndefinedDeep(prevRec));
       break;
     }
 
     case 'DELETE': {
       const deleted = action.revertData.deletedRecord as AttendanceRecord;
-      const cleanUid = (deleted.rfidUID || deleted.uid).toUpperCase();
+      const resolved = await resolveStudentByAnyId(deleted.studentDbId || deleted.rfidUID || deleted.uid);
+      const studentDbId = resolved?.studentDbId || deleted.studentDbId || (deleted.rfidUID || deleted.uid).toUpperCase();
       const trashId = action.revertData.trashId as string;
-      await set(ref(db, `students/${cleanUid}/attendance/${deleted.date}`), stripUndefinedDeep(deleted));
+      await set(ref(db, `students/${studentDbId}/attendance/${deleted.date}`), stripUndefinedDeep(deleted));
       if (trashId) {
         await remove(ref(db, `attendance_trash/${trashId}`));
       }
@@ -2981,26 +3643,29 @@ export async function executeUndoAction(
 
     case 'OVERRIDE': {
       const prevRec = action.revertData.previousRecord as AttendanceRecord;
-      const cleanUid = (prevRec.rfidUID || prevRec.uid).toUpperCase();
-      await set(ref(db, `students/${cleanUid}/attendance/${prevRec.date}`), stripUndefinedDeep(prevRec));
+      const resolved = await resolveStudentByAnyId(prevRec.studentDbId || prevRec.rfidUID || prevRec.uid);
+      const studentDbId = resolved?.studentDbId || prevRec.studentDbId || (prevRec.rfidUID || prevRec.uid).toUpperCase();
+      await set(ref(db, `students/${studentDbId}/attendance/${prevRec.date}`), stripUndefinedDeep(prevRec));
       break;
     }
 
     case 'BULK_DELETE': {
       const deletedRecords = action.revertData.deletedRecords as AttendanceRecord[];
       for (const rec of deletedRecords) {
-        const cleanUid = (rec.rfidUID || rec.uid).toUpperCase();
-        await set(ref(db, `students/${cleanUid}/attendance/${rec.date}`), stripUndefinedDeep(rec));
-        await remove(ref(db, `attendance_trash/${rec.date}_${cleanUid}`));
+        const resolved = await resolveStudentByAnyId(rec.studentDbId || rec.rfidUID || rec.uid);
+        const studentDbId = resolved?.studentDbId || rec.studentDbId || (rec.rfidUID || rec.uid).toUpperCase();
+        await set(ref(db, `students/${studentDbId}/attendance/${rec.date}`), stripUndefinedDeep(rec));
+        await remove(ref(db, `attendance_trash/${rec.date}_${studentDbId}`));
       }
       break;
     }
 
     case 'BULK_EDIT': {
-      const prevStates = action.revertData.previousStates as Array<{ date: string; uid: string; prevStatus: AttendanceStatus }>;
+      const prevStates = action.revertData.previousStates as Array<{ date: string; uid: string; studentDbId?: string; prevStatus: AttendanceStatus }>;
       for (const p of prevStates) {
-        const cleanUid = p.uid.toUpperCase();
-        const targetRef = ref(db, `students/${cleanUid}/attendance/${p.date}`);
+        const resolved = await resolveStudentByAnyId(p.studentDbId || p.uid);
+        const studentDbId = resolved?.studentDbId || p.studentDbId || p.uid.toUpperCase();
+        const targetRef = ref(db, `students/${studentDbId}/attendance/${p.date}`);
         const snap = await get(targetRef);
         if (snap.exists()) {
           const cur = snap.val() as AttendanceRecord;
@@ -3030,15 +3695,43 @@ function normalizeRfidKey(raw: string): string {
   return raw.trim().toUpperCase();
 }
 
-function mergeAttendanceEntries(existing: any, incoming: any): any {
+export function toEpochMs(val: any, dateStr?: string, timeStr?: string): number {
+  if (typeof val === 'number' && Number.isFinite(val)) {
+    return val > 1e12 ? val : val > 1e9 ? val * 1000 : 0;
+  }
+  if (dateStr && timeStr && timeStr !== '00:00:00') {
+    const parsed = new Date(`${dateStr}T${timeStr}+05:30`).getTime();
+    if (!isNaN(parsed)) return parsed;
+  }
+  return 0;
+}
+
+export function mergeAttendanceEntries(existing: any, incoming: any): any {
   if (!existing) return incoming;
   if (!incoming) return existing;
-  // Preserve admin overrides & edit history if present in existing
+  // Never overwrite admin overrides, admin-edited records, or soft-deleted entries
+  if (existing.isOverridden || existing.lastModifiedAt || existing.isDeleted) {
+    return {
+      ...incoming,
+      ...existing,
+      isOverridden: existing.isOverridden ?? incoming.isOverridden,
+      overrideReason: existing.overrideReason ?? incoming.overrideReason,
+      previousEdits: existing.previousEdits ?? incoming.previousEdits,
+    };
+  }
+  const existingTs = toEpochMs(existing.timestamp, existing.date, existing.time);
+  const incomingTs = toEpochMs(incoming.timestamp, incoming.date, incoming.time);
+  if (incomingTs > existingTs) {
+    return {
+      ...existing,
+      ...incoming,
+      previousEdits: existing.previousEdits ?? incoming.previousEdits,
+    };
+  }
+  // Never overwrite newer or equal unified record with older legacy data
   return {
     ...incoming,
     ...existing,
-    isOverridden: existing.isOverridden ?? incoming.isOverridden,
-    overrideReason: existing.overrideReason ?? incoming.overrideReason,
     previousEdits: existing.previousEdits ?? incoming.previousEdits,
   };
 }
@@ -3211,6 +3904,62 @@ export async function inspectLegacyDatabase(): Promise<MigrationInspection> {
 }
 
 /**
+ * Real-time listener on legacy /attendance/{DATE}/{UID} so admin detects pending or newly uploaded
+ * legacy records immediately and triggers automatic verified migration without manual intervention.
+ */
+export function subscribeToLegacyAttendanceChanges(
+  onDetected: (info: { hasLegacy: boolean; recordCount: number; signature: string }) => void,
+  onError?: (err: Error) => void
+): () => void {
+  try {
+    const db = getFirebaseDatabase();
+    const attRef = ref(db, 'attendance');
+    const unsubscribe = onValue(
+      attRef,
+      (snap) => {
+        if (!snap.exists()) {
+          onDetected({ hasLegacy: false, recordCount: 0, signature: '' });
+          return;
+        }
+        const val = snap.val() as Record<string, Record<string, any>>;
+        const keys: string[] = [];
+        let recordCount = 0;
+        Object.entries(val || {}).forEach(([dateKey, dayMap]) => {
+          if (!dayMap || typeof dayMap !== 'object') return;
+          Object.entries(dayMap).forEach(([uidKey, rawRec]) => {
+            if (!rawRec || typeof rawRec !== 'object') return;
+            recordCount++;
+            const normUid = normalizeRfidKey((rawRec as any).rfidUID || (rawRec as any).uid || uidKey);
+            keys.push(`${dateKey}::${normUid}::${(rawRec as any).timestamp || ''}`);
+          });
+        });
+        keys.sort();
+        onDetected({
+          hasLegacy: recordCount > 0,
+          recordCount,
+          signature: `${recordCount}|${keys.join(',')}`,
+        });
+      },
+      (err) => {
+        console.warn('Legacy /attendance listener error:', err?.message);
+        onError?.(
+          new RtdbOperationError(
+            'ON_VALUE',
+            '/attendance',
+            (err as any)?.code || 'PERMISSION_DENIED',
+            err?.message || 'Permission denied reading /attendance'
+          )
+        );
+      }
+    );
+    return () => off(attRef, 'value', unsubscribe);
+  } catch (err: any) {
+    onError?.(err);
+    return () => {};
+  }
+}
+
+/**
  * Create a verified backup under /backups/{backupKey} before migration and return downloadable JSON + RTDB path.
  */
 export async function exportCompleteDatabaseBackup(
@@ -3332,7 +4081,22 @@ export async function exportCompleteDatabaseBackup(
  * 5. Verifies every migrated record via read-back parity checks.
  * 6. Preserves /attendance until 100% verification passes.
  */
+let activeMigrationPromise: Promise<MigrationResult> | null = null;
+
 export async function runUnifiedDatabaseMigration(
+  adminUser: { email?: string | null; uid?: string }
+): Promise<MigrationResult> {
+  if (activeMigrationPromise) {
+    return activeMigrationPromise;
+  }
+
+  activeMigrationPromise = executeUnifiedDatabaseMigrationInternal(adminUser).finally(() => {
+    activeMigrationPromise = null;
+  });
+  return activeMigrationPromise;
+}
+
+async function executeUnifiedDatabaseMigrationInternal(
   adminUser: { email?: string | null; uid?: string }
 ): Promise<MigrationResult> {
   const db = getFirebaseDatabase();
@@ -3427,63 +4191,41 @@ export async function runUnifiedDatabaseMigration(
   }
 
   const studentRegistry: Record<string, Student> = {};
-  const lowercaseKeysToClean: string[] = [];
-  const affectedNormKeys = new Set<string>();
+  const rfidToDbKey: Record<string, string> = {};
 
   for (const [rawKey, rawStu] of Object.entries(rawStudents)) {
     if (!rawStu || typeof rawStu !== 'object') continue;
-    const normKey = normalizeRfidKey(rawStu.uid || rawKey);
-    const existing = studentRegistry[normKey];
+    const dbKey = rawKey.trim();
+    const cardRfid = normalizeRfidKey(rawStu.rfidUID || rawStu.uid || dbKey);
+    const existing = studentRegistry[dbKey];
     const mergedAttendance: Record<string, AttendanceRecord> = {
       ...(existing?.attendance || {}),
       ...(rawStu.attendance || {}),
     };
-    studentRegistry[normKey] = stripUndefinedDeep({
+    studentRegistry[dbKey] = stripUndefinedDeep({
       ...(existing || {}),
       ...rawStu,
-      uid: normKey,
+      studentDbId: dbKey,
+      rfidUID: cardRfid,
+      uid: cardRfid,
       ...(Object.keys(mergedAttendance).length > 0 ? { attendance: mergedAttendance } : {}),
     });
-    if (rawKey !== normKey) {
-      lowercaseKeysToClean.push(rawKey);
-      affectedNormKeys.add(normKey);
-    }
+    rfidToDbKey[cardRfid] = dbKey;
   }
 
-  // Normalize only mixed-case student keys if any actually exist
+  // Also read /rfid_to_student index so reassigned RFID cards route legacy records to the right student
   try {
-    for (const normKey of affectedNormKeys) {
-      await runRtdbOp('SET', `/students/${normKey}`, () =>
-        set(ref(db, `students/${normKey}`), stripUndefinedDeep(studentRegistry[normKey]))
-      );
+    const idxSnap = await withTimeout(get(ref(db, 'rfid_to_student')), 2500, null);
+    if (idxSnap && idxSnap.exists && idxSnap.exists()) {
+      const idxVal = idxSnap.val() as Record<string, any>;
+      Object.entries(idxVal || {}).forEach(([rfidKey, mapping]) => {
+        const targetDbId = typeof mapping === 'string' ? mapping : mapping?.studentDbId;
+        if (targetDbId && studentRegistry[targetDbId]) {
+          rfidToDbKey[normalizeRfidKey(rfidKey)] = targetDbId;
+        }
+      });
     }
-    for (const oldKey of lowercaseKeysToClean) {
-      await runRtdbOp('REMOVE', `/students/${oldKey}`, () =>
-        remove(ref(db, `students/${oldKey}`))
-      );
-    }
-  } catch (err: any) {
-    const opErr = err instanceof RtdbOperationError ? err : null;
-    const msg = err?.message || 'Failed normalizing student keys';
-    return {
-      success: false,
-      message: `Migration aborted while normalizing /students keys. Legacy /attendance was preserved.`,
-      adminUid: verifiedAdmin.uid,
-      backupPath,
-      backupVerifiedCount,
-      backupExpectedCount,
-      migratedCount: 0,
-      skippedDuplicateCount: 0,
-      unregisteredCount: 0,
-      verifiedCount: 0,
-      totalLegacyCount: 0,
-      legacyRemoved: false,
-      failedOperation: opErr?.operation || 'SET',
-      failedPath: opErr?.path || '/students',
-      errors: [msg],
-      recordLogs,
-    };
-  }
+  } catch {}
 
   // 4. Read all legacy records from /attendance (explicitly, no silent timeout suppression)
   let hasRootAttendance = false;
@@ -3579,65 +4321,66 @@ export async function runUnifiedDatabaseMigration(
   let firstFailedOperation: string | undefined;
   let firstFailedPath: string | undefined;
 
-  const expectedTargets: Array<{ targetPath: string; date: string; uid: string; status: string }> = [];
+  const expectedTargets: Array<{ targetPath: string; date: string; uid: string; studentDbId?: string; status: string }> = [];
 
-  // 5. Migrate each record strictly to /students/{UID}/attendance/{DATE}
+  // 5. Migrate each record dynamically to /students/{studentDbId}/attendance/{DATE}
   for (const entry of legacyPairs.values()) {
     const { date, normUid, rawRec } = entry;
 
-    let targetStudent = studentRegistry[normUid];
+    let targetStudent: Student | undefined =
+      (rawRec.studentDbId && studentRegistry[rawRec.studentDbId]) ||
+      (rfidToDbKey[normUid] && studentRegistry[rfidToDbKey[normUid]]) ||
+      studentRegistry[normUid];
+
     if (!targetStudent && rawRec.studentId) {
       const targetStuId = rawRec.studentId.toString().trim().toUpperCase();
       targetStudent = Object.values(studentRegistry).find(
         (s) => s.studentId?.trim().toUpperCase() === targetStuId
-      ) as Student;
+      );
     }
     if (!targetStudent && rawRec.authUid) {
       targetStudent = Object.values(studentRegistry).find(
         (s) => s.authUid === rawRec.authUid
-      ) as Student;
+      );
     }
     if (!targetStudent && rawRec.email) {
       const targetEmail = rawRec.email.toString().trim().toLowerCase();
       targetStudent = Object.values(studentRegistry).find(
         (s) => s.email?.trim().toLowerCase() === targetEmail
-      ) as Student;
+      );
     }
     if (!targetStudent && (rawRec.studentName || rawRec.name)) {
       const targetName = (rawRec.studentName || rawRec.name).toString().trim().toLowerCase();
       targetStudent = Object.values(studentRegistry).find(
         (s) => s.name?.trim().toLowerCase() === targetName
-      ) as Student;
-    }
-    if (!targetStudent) {
-      const infoMatch =
-        lookupStudentInfo(normUid) ||
-        (rawRec.studentName || rawRec.name ? lookupStudentInfo(rawRec.studentName || rawRec.name) : null);
-      if (infoMatch && studentRegistry[infoMatch.rfidUID.toUpperCase()]) {
-        targetStudent = studentRegistry[infoMatch.rfidUID.toUpperCase()];
-      }
+      );
     }
 
     try {
       if (targetStudent) {
-        const targetUid = normalizeRfidKey(targetStudent.uid);
-        const destPath = `students/${targetUid}/attendance/${date}`;
+        const targetDbId = (targetStudent.studentDbId || normUid).trim();
+        const targetUid = normalizeRfidKey(targetStudent.rfidUID || targetStudent.uid || normUid);
+        const destPath = `students/${targetDbId}/attendance/${date}`;
         const existingAtTarget = targetStudent.attendance?.[date];
         const normalizedRec = stripUndefinedDeep(
           normalizeAttendanceRecord(
             {
               ...rawRec,
+              studentDbId: targetDbId,
               uid: targetUid,
+              studentUID: targetUid,
               rfidUID: targetUid,
               studentRfid: targetUid,
               studentName: rawRec.studentName || rawRec.name || targetStudent.name,
               studentId: rawRec.studentId || targetStudent.studentId,
               department: rawRec.department || targetStudent.department,
               authUid: rawRec.authUid || targetStudent.authUid || '',
+              source: rawRec.source || 'migration',
               date: rawRec.date || date,
             },
             date,
-            targetUid
+            targetUid,
+            targetDbId
           )
         );
 
@@ -3663,7 +4406,7 @@ export async function runUnifiedDatabaseMigration(
             action: 'merged',
             message: 'Duplicate avoided; merged with existing unified record',
           });
-          expectedTargets.push({ targetPath: destPath, date, uid: targetUid, status: merged.status });
+          expectedTargets.push({ targetPath: destPath, date, uid: targetUid, studentDbId: targetDbId, status: merged.status });
         } else {
           await runRtdbOp('SET', `/${destPath}`, () => set(ref(db, destPath), normalizedRec));
           migratedCount++;
@@ -3674,10 +4417,9 @@ export async function runUnifiedDatabaseMigration(
             action: 'migrated',
             message: `Preserved ${normalizedRec.time} (${normalizedRec.status})`,
           });
-          expectedTargets.push({ targetPath: destPath, date, uid: targetUid, status: normalizedRec.status });
+          expectedTargets.push({ targetPath: destPath, date, uid: targetUid, studentDbId: targetDbId, status: normalizedRec.status });
         }
       } else {
-        // Unregistered RFID: preserve in recovery node without discarding
         const recPath = `migration_recovery/unregistered_attendance/${normUid}/${date}`;
         const normalizedUnreg = stripUndefinedDeep(
           normalizeAttendanceRecord(
@@ -3735,11 +4477,17 @@ export async function runUnifiedDatabaseMigration(
       if (checkSnap.exists()) {
         const val = checkSnap.val() || {};
         const storedUid = normalizeRfidKey(val.uid || val.rfidUID || '');
+        const storedDbId = (val.studentDbId || '').toString().trim();
+        const idMatches =
+          storedUid === target.uid ||
+          (target.studentDbId && storedDbId === target.studentDbId);
         const hasValidFields =
           val.date === target.date &&
-          storedUid === target.uid &&
+          idMatches &&
           Boolean(val.status) &&
-          Boolean(val.time);
+          Boolean(val.time) &&
+          typeof val.timestamp === 'number' &&
+          val.timestamp > 0;
         if (hasValidFields) {
           verifiedCount++;
         } else {
@@ -3896,18 +4644,18 @@ export function subscribeToMigrationRecovery(
 
 export async function assignRecoveredAttendanceToStudent(
   unregisteredUidInput: string,
-  targetStudentUidInput: string,
+  targetStudentIdOrRfid: string,
   adminUser: { email?: string | null; uid?: string }
 ): Promise<{ success: boolean; assignedCount: number }> {
   const db = getFirebaseDatabase();
   const unregisteredUid = normalizeRfidKey(unregisteredUidInput);
-  const targetUid = normalizeRfidKey(targetStudentUidInput);
-
-  const studentSnap = await get(ref(db, `students/${targetUid}`));
-  if (!studentSnap.exists()) {
-    throw new Error(`Target student ${targetUid} does not exist.`);
+  const resolved = await resolveStudentByAnyId(targetStudentIdOrRfid);
+  if (!resolved) {
+    throw new Error(`Target student ${targetStudentIdOrRfid} does not exist.`);
   }
-  const targetStudent = studentSnap.val() as Student;
+  const targetDbId = resolved.studentDbId;
+  const targetStudent = resolved.student;
+  const targetCardUid = resolved.rfidUID;
 
   const recRef = ref(db, `migration_recovery/unregistered_attendance/${unregisteredUid}`);
   const recSnap = await get(recRef);
@@ -3919,23 +4667,27 @@ export async function assignRecoveredAttendanceToStudent(
   const assignedDates: string[] = [];
 
   for (const [dateKey, rawRec] of Object.entries(recMap)) {
-    const destRef = ref(db, `students/${targetUid}/attendance/${dateKey}`);
+    const destRef = ref(db, `students/${targetDbId}/attendance/${dateKey}`);
     const existingSnap = await get(destRef);
-    const updatedRec = normalizeAttendanceRecord(
-      {
-        ...rawRec,
-        uid: targetUid,
-        rfidUID: targetUid,
-        studentRfid: targetUid,
-        studentName: targetStudent.name,
-        studentId: targetStudent.studentId,
-        department: targetStudent.department,
-        authUid: targetStudent.authUid || '',
-        date: dateKey,
-        notes: `Recovered & reassigned from legacy UID ${unregisteredUid}`,
-      },
-      dateKey,
-      targetUid
+    const updatedRec = stripUndefinedDeep(
+      normalizeAttendanceRecord(
+        {
+          ...rawRec,
+          studentDbId: targetDbId,
+          uid: targetCardUid,
+          rfidUID: targetCardUid,
+          studentRfid: targetCardUid,
+          studentName: targetStudent.name,
+          studentId: targetStudent.studentId,
+          department: targetStudent.department,
+          authUid: targetStudent.authUid || '',
+          date: dateKey,
+          notes: `Recovered & reassigned from legacy UID ${unregisteredUid}`,
+        },
+        dateKey,
+        targetCardUid,
+        targetDbId
+      )
     );
 
     if (existingSnap.exists()) {
@@ -3950,7 +4702,7 @@ export async function assignRecoveredAttendanceToStudent(
   await remove(recRef);
 
   await logAuditActivity('DATABASE_MIGRATION', adminUser, {
-    studentRfid: targetUid,
+    studentRfid: targetCardUid,
     studentName: targetStudent.name,
     studentId: targetStudent.studentId,
     affectedCount: assignedDates.length,
@@ -3971,6 +4723,779 @@ export async function deleteRecoveredAttendance(
     studentRfid: unregisteredUid,
     reason: `Dismissed unregistered recovered attendance records for unknown UID ${unregisteredUid}`,
   });
+}
+
+/**
+ * Administrator-only recovery: Links an existing Firebase Authentication UID
+ * to an existing registered student node (/students/{studentDbId}) WITHOUT
+ * overwriting student details, RFID card, or attendance history.
+ */
+export async function linkAuthUidToStudent(
+  studentDbIdInput: string,
+  authUidInput: string,
+  overrideEmail?: string
+): Promise<{ studentDbId: string; authUid: string; rfidUID: string }> {
+  const adminCheck = await verifyAdministratorAuth();
+  const db = getFirebaseDatabase();
+  const fs = getFirebaseFirestore();
+
+  const studentDbId = studentDbIdInput.trim();
+  const authUid = authUidInput.trim();
+  if (!studentDbId || !authUid) {
+    throw new Error('Both Student Database ID and Firebase Auth UID are required.');
+  }
+  if (authUid === CONFIGURED_ADMIN_UID) {
+    throw new Error('Cannot link the primary System Administrator UID as a student account.');
+  }
+
+  const studentSnap = await runRtdbOp('GET', `/students/${studentDbId}`, () =>
+    get(ref(db, `students/${studentDbId}`))
+  );
+  if (!studentSnap.exists()) {
+    throw new Error(`Student record not found at /students/${studentDbId}.`);
+  }
+
+  const student = studentSnap.val() as Student;
+  const rfidUID = (student.rfidUID || student.uid || studentDbId).trim().toUpperCase();
+
+  // Guard against linking an Auth UID that already belongs to a different student
+  const existingMapSnap = await withTimeout(get(ref(db, `auth_to_student/${authUid}`)), 2500, null);
+  if (existingMapSnap && existingMapSnap.exists && existingMapSnap.exists()) {
+    const mappedDbId = existingMapSnap.val()?.studentDbId;
+    if (mappedDbId && mappedDbId !== studentDbId) {
+      throw new Error(
+        `Firebase Auth UID ${authUid} is already linked to student "${mappedDbId}". Resolve the conflict before re-linking.`
+      );
+    }
+  }
+
+  const resolvedEmail = (overrideEmail || student.email || '').trim().toLowerCase();
+
+  await runRtdbOp('UPDATE', `/students/${studentDbId}`, () =>
+    update(
+      ref(db, `students/${studentDbId}`),
+      stripUndefinedDeep({
+        studentDbId,
+        rfidUID,
+        uid: rfidUID,
+        authUid,
+        ...(resolvedEmail && !student.email ? { email: resolvedEmail } : {}),
+      })
+    )
+  );
+
+  const userProfile: UserProfile = stripUndefinedDeep({
+    uid: authUid,
+    studentDbId,
+    name: student.name || 'Student',
+    email: resolvedEmail,
+    rollNumber: student.studentId || '',
+    department: student.department || '',
+    year: student.year || '',
+    semester: student.semester || 'Semester 1',
+    role: 'student',
+    rfidUID,
+    phone: student.phone || '',
+    createdAt: Date.now(),
+  });
+
+  await runRtdbOp('SET', `/users/${authUid}`, () =>
+    update(ref(db, `users/${authUid}`), userProfile)
+  );
+  await runRtdbOp('SET', `/auth_to_student/${authUid}`, () =>
+    set(
+      ref(db, `auth_to_student/${authUid}`),
+      stripUndefinedDeep({
+        authUid,
+        studentDbId,
+        rfidUID,
+        rollNumber: student.studentId || '',
+        email: resolvedEmail,
+        updatedAt: Date.now(),
+      })
+    )
+  );
+  await runRtdbOp('UPDATE', `/rfid_to_student/${rfidUID}`, () =>
+    update(
+      ref(db, `rfid_to_student/${rfidUID}`),
+      stripUndefinedDeep({
+        rfidUID,
+        studentDbId,
+        authUid,
+        rollNumber: student.studentId || '',
+        active: student.status !== 'inactive',
+        updatedAt: Date.now(),
+      })
+    )
+  );
+  await update(ref(db, `rfid_to_uid/${rfidUID}`), { authUid }).catch(() => {});
+  await withTimeout(setDoc(doc(fs, 'users', authUid), userProfile, { merge: true }), 2500, null).catch(() => {});
+
+  await logAuditActivity('STUDENT_UPDATE', { uid: adminCheck.uid, email: adminCheck.email }, {
+    studentRfid: rfidUID,
+    studentName: student.name,
+    studentId: student.studentId,
+    reason: `Linked Firebase Auth UID ${authUid} to existing student ${studentDbId}`,
+  });
+
+  return { studentDbId, authUid, rfidUID };
+}
+
+/**
+ * Administrator-only provisioning for an EXISTING student record (/students/{studentDbId})
+ * that does not yet have a Firebase Authentication account. Preserves existing RFID, student
+ * profile, and all nested attendance records without creating a duplicate student.
+ */
+export async function provisionAuthForExistingStudent(
+  studentDbIdInput: string,
+  passwordInput: string,
+  emailOverride?: string
+): Promise<{ studentDbId: string; authUid: string; rfidUID: string; email: string }> {
+  await verifyAdministratorAuth();
+  const db = getFirebaseDatabase();
+  const studentDbId = studentDbIdInput.trim();
+  const password = passwordInput.trim();
+
+  if (password.length < 6) {
+    throw new Error('Password must be at least 6 characters.');
+  }
+
+  const snap = await runRtdbOp('GET', `/students/${studentDbId}`, () =>
+    get(ref(db, `students/${studentDbId}`))
+  );
+  if (!snap.exists()) {
+    throw new Error(`Student record not found at /students/${studentDbId}.`);
+  }
+
+  const student = snap.val() as Student;
+  if (student.authUid) {
+    throw new Error(`Student "${student.name}" already has a linked Firebase Auth UID (${student.authUid}).`);
+  }
+
+  const email = (emailOverride || student.email || '').trim().toLowerCase();
+  if (!email) {
+    throw new Error('An email address is required to provision Firebase Authentication login.');
+  }
+
+  const config = getActiveFirebaseConfig();
+  const secondaryAppName = `student_prov_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+  const secondaryApp = initializeApp(
+    {
+      ...config,
+      apiKey: config.apiKey || import.meta.env.VITE_FIREBASE_API_KEY || PROJECT_FIREBASE_API_KEY,
+    },
+    secondaryAppName
+  );
+  const secondaryAuth = getAuth(secondaryApp);
+
+  let authUid = '';
+  try {
+    const cred = await createUserWithEmailAndPassword(secondaryAuth, email, password);
+    authUid = cred.user.uid;
+    await fbSignOut(secondaryAuth);
+  } catch (err: any) {
+    if (err?.code === 'auth/email-already-in-use') {
+      throw new Error(
+        `The email ${email} already exists in Firebase Authentication. Paste that user's Firebase Auth UID in the manual linking tool instead of recreating the account.`
+      );
+    }
+    throw new Error(err?.message || 'Failed provisioning Firebase Authentication account.');
+  } finally {
+    try {
+      await deleteApp(secondaryApp);
+    } catch {}
+  }
+
+  const linked = await linkAuthUidToStudent(studentDbId, authUid, email);
+  return { ...linked, email };
+}
+
+/**
+ * Pure validation engine used by both live Admin Diagnostics and automated verification.
+ */
+export function evaluateDatabaseConsistency(params: {
+  adminUid: string;
+  adminEmail?: string | null;
+  permissionChecks: Array<{ path: string; operation: string; allowed: boolean; error?: string }>;
+  studentsMap: Record<string, Student>;
+  usersMap: Record<string, Partial<UserProfile>>;
+  authToStudentMap: Record<string, any>;
+  rfidToStudentMap: Record<string, any>;
+  legacyAttendanceMap?: Record<string, any>;
+  legacyStudentsAttendanceMap?: Record<string, any>;
+  recoveryVaultMap?: Record<string, any>;
+}): DatabaseValidationReport {
+  const {
+    adminUid,
+    adminEmail,
+    permissionChecks,
+    studentsMap,
+    usersMap,
+    authToStudentMap,
+    rfidToStudentMap,
+    legacyAttendanceMap,
+    legacyStudentsAttendanceMap,
+    recoveryVaultMap,
+  } = params;
+
+  const issues: DatabaseDiagnosticIssue[] = [];
+  const unlinkedUserProfiles: UnlinkedUserProfileEntry[] = [];
+
+  let missingUserProfiles = 0;
+  let incorrectRoles = 0;
+  let missingMappings = 0;
+  let ambiguousMappings = 0;
+  let invalidRfids = 0;
+  let incorrectPaths = 0;
+  let missingAttendanceIssues = 0;
+  let permissionErrors = 0;
+
+  // 1. Permission-denied errors
+  for (const check of permissionChecks) {
+    if (!check.allowed) {
+      permissionErrors++;
+      issues.push({
+        id: `perm_${check.path}`,
+        category: 'permissions',
+        severity: 'critical',
+        title: `Permission check failed at ${check.path}`,
+        description: check.error || `Client failed ${check.operation} check on ${check.path}. Ensure updated database.rules.json and firestore.rules are published.`,
+        path: check.path,
+      });
+    }
+  }
+
+  // 2. Check Admin's own /users/{adminUid} profile
+  const adminUserDoc = usersMap[adminUid];
+  if (!adminUserDoc || adminUserDoc.role !== 'admin') {
+    missingUserProfiles++;
+    issues.push({
+      id: `admin_profile_${adminUid}`,
+      category: !adminUserDoc ? 'missing_profiles' : 'incorrect_roles',
+      severity: 'warning',
+      title: !adminUserDoc ? 'Missing RTDB profile for signed-in Admin' : 'Admin user profile has non-admin role',
+      description: `/users/${adminUid} ${!adminUserDoc ? 'does not exist' : `has role "${adminUserDoc.role}"`}. Auto-repair creates/updates /users/${adminUid} cleanly.`,
+      path: `/users/${adminUid}`,
+      authUid: adminUid,
+      canAutoRepair: true,
+      repairAction: 'Ensure /users/{adminUid} has role: "admin"',
+    });
+  }
+
+  // Track active RFIDs to detect duplicates
+  const rfidOwners: Record<string, string[]> = {};
+  const linkedAuthUids = new Set<string>();
+
+  // 3. Inspect every registered student under /students/{studentDbId}
+  for (const [dbKey, st] of Object.entries(studentsMap || {})) {
+    if (!st || typeof st !== 'object') continue;
+    const rawRfid = (st.rfidUID || st.uid || '').trim();
+    const normRfid = rawRfid.toUpperCase();
+
+    // Incorrect path / metadata mismatch
+    if (st.studentDbId && st.studentDbId !== dbKey) {
+      incorrectPaths++;
+      issues.push({
+        id: `path_mismatch_${dbKey}`,
+        category: 'incorrect_paths',
+        severity: 'warning',
+        title: `Student database key mismatch (${dbKey})`,
+        description: `Student "${st.name}" is stored at /students/${dbKey} but carries studentDbId="${st.studentDbId}".`,
+        path: `/students/${dbKey}`,
+        studentDbId: dbKey,
+        canAutoRepair: true,
+        repairAction: 'Align studentDbId field with storage key',
+      });
+    } else if (!st.studentDbId) {
+      incorrectPaths++;
+      issues.push({
+        id: `missing_dbid_${dbKey}`,
+        category: 'incorrect_paths',
+        severity: 'warning',
+        title: `Missing studentDbId property (${st.name || dbKey})`,
+        description: `Node /students/${dbKey} is missing explicit studentDbId field.`,
+        path: `/students/${dbKey}`,
+        studentDbId: dbKey,
+        canAutoRepair: true,
+        repairAction: 'Populate studentDbId without modifying attendance',
+      });
+    }
+
+    // Invalid or duplicate RFID assignment
+    if (!normRfid || !/^[A-Z0-9_-]{4,32}$/.test(normRfid)) {
+      invalidRfids++;
+      issues.push({
+        id: `invalid_rfid_${dbKey}`,
+        category: 'invalid_rfid',
+        severity: 'critical',
+        title: `Invalid or missing RFID UID for ${st.name || dbKey}`,
+        description: `Expected a valid uppercase hex/alphanumeric RFID UID; found "${rawRfid || 'empty'}".`,
+        path: `/students/${dbKey}`,
+        studentDbId: dbKey,
+        rfidUID: rawRfid,
+      });
+    } else {
+      if (st.status !== 'inactive') {
+        if (!rfidOwners[normRfid]) rfidOwners[normRfid] = [];
+        rfidOwners[normRfid].push(dbKey);
+      }
+
+      if (rawRfid !== normRfid || (st.uid || '').trim() !== normRfid || (st.rfidUID || '').trim() !== normRfid) {
+        invalidRfids++;
+        issues.push({
+          id: `norm_rfid_${dbKey}`,
+          category: 'invalid_rfid',
+          severity: 'warning',
+          title: `Unnormalized RFID case/fields for ${st.name || dbKey}`,
+          description: `Fields uid="${st.uid || ''}" and rfidUID="${st.rfidUID || ''}" should match uppercase "${normRfid}".`,
+          path: `/students/${dbKey}`,
+          studentDbId: dbKey,
+          rfidUID: normRfid,
+          canAutoRepair: true,
+          repairAction: 'Normalize uid & rfidUID casing',
+        });
+      }
+
+      const rIdx = rfidToStudentMap[normRfid];
+      const rIdxDbId = typeof rIdx === 'string' ? rIdx : rIdx?.studentDbId;
+      if (!rIdx || rIdxDbId !== dbKey) {
+        missingMappings++;
+        issues.push({
+          id: `missing_rfid_idx_${dbKey}`,
+          category: 'missing_mappings',
+          severity: 'warning',
+          title: `Missing or out-of-sync RFID index for ${st.name || dbKey}`,
+          description: `/rfid_to_student/${normRfid} ${!rIdx ? 'is missing' : `points to "${rIdxDbId}" instead of "${dbKey}"`}.`,
+          path: `/rfid_to_student/${normRfid}`,
+          studentDbId: dbKey,
+          rfidUID: normRfid,
+          canAutoRepair: true,
+          repairAction: 'Sync /rfid_to_student index',
+        });
+      }
+    }
+
+    // Check Auth UID, /users/{authUid}, and /auth_to_student/{authUid}
+    const authUid = (st.authUid || '').trim();
+    if (!authUid) {
+      // Check candidate matches in usersMap without guessing
+      const stEmail = (st.email || '').trim().toLowerCase();
+      const stRoll = (st.studentId || '').trim().toUpperCase();
+      const candidateUids = Object.entries(usersMap || {})
+        .filter(([uid, u]) => {
+          if (!u || uid === CONFIGURED_ADMIN_UID || u.role === 'admin') return false;
+          const uEmail = (u.email || '').trim().toLowerCase();
+          const uRoll = (u.rollNumber || '').trim().toUpperCase();
+          const uRfid = (u.rfidUID || '').trim().toUpperCase();
+          return (
+            u.studentDbId === dbKey ||
+            (normRfid && uRfid === normRfid) ||
+            (stEmail && uEmail === stEmail) ||
+            (stRoll && uRoll === stRoll)
+          );
+        })
+        .map(([uid]) => uid);
+
+      if (candidateUids.length > 1) {
+        ambiguousMappings++;
+        issues.push({
+          id: `ambiguous_auth_${dbKey}`,
+          category: 'ambiguous_mappings',
+          severity: 'critical',
+          title: `Ambiguous Auth matches for ${st.name || dbKey}`,
+          description: `Multiple user accounts (${candidateUids.join(', ')}) match this student. Manual administrator selection is required; auto-repair will NOT guess.`,
+          path: `/students/${dbKey}`,
+          studentDbId: dbKey,
+          rfidUID: normRfid,
+        });
+      } else if (candidateUids.length === 1) {
+        missingMappings++;
+        issues.push({
+          id: `unlinked_match_${dbKey}`,
+          category: 'missing_mappings',
+          severity: 'warning',
+          title: `Unlinked Auth UID match found for ${st.name || dbKey}`,
+          description: `Student lacks authUid, but uniquely matches Auth UID ${candidateUids[0]}. Safe auto-repair can link them without modifying student data.`,
+          path: `/students/${dbKey}`,
+          studentDbId: dbKey,
+          authUid: candidateUids[0],
+          rfidUID: normRfid,
+          canAutoRepair: true,
+          repairAction: 'Link verified Auth UID to existing student',
+        });
+      } else {
+        missingMappings++;
+        issues.push({
+          id: `no_auth_${dbKey}`,
+          category: 'missing_mappings',
+          severity: 'warning',
+          title: `No Auth UID linked to ${st.name || dbKey}`,
+          description: `Student profile exists at /students/${dbKey} with RFID ${normRfid || 'N/A'}, but no Firebase Auth UID is linked yet.`,
+          path: `/students/${dbKey}`,
+          studentDbId: dbKey,
+          rfidUID: normRfid,
+        });
+      }
+    } else {
+      linkedAuthUids.add(authUid);
+      const uProfile = usersMap[authUid];
+      const aMap = authToStudentMap[authUid];
+
+      if (!uProfile) {
+        missingUserProfiles++;
+        issues.push({
+          id: `missing_user_profile_${authUid}`,
+          category: 'missing_profiles',
+          severity: 'critical',
+          title: `Missing /users/${authUid} profile for ${st.name || dbKey}`,
+          description: `Student has authUid="${authUid}", but /users/${authUid} is missing, blocking role & profile lookup on login.`,
+          path: `/users/${authUid}`,
+          studentDbId: dbKey,
+          authUid,
+          rfidUID: normRfid,
+          canAutoRepair: true,
+          repairAction: 'Create missing /users/{authUid} profile from verified student record',
+        });
+      } else {
+        if (uProfile.role !== 'student') {
+          incorrectRoles++;
+          issues.push({
+            id: `bad_role_${authUid}`,
+            category: 'incorrect_roles',
+            severity: 'critical',
+            title: `Incorrect role on /users/${authUid} (${uProfile.role || 'missing'})`,
+            description: `Account linked to student "${st.name}" has role "${uProfile.role || 'undefined'}" instead of "student".`,
+            path: `/users/${authUid}`,
+            studentDbId: dbKey,
+            authUid,
+            canAutoRepair: true,
+            repairAction: 'Set role to "student"',
+          });
+        }
+        if (uProfile.studentDbId !== dbKey || (normRfid && (uProfile.rfidUID || '').toUpperCase() !== normRfid)) {
+          missingMappings++;
+          issues.push({
+            id: `stale_user_map_${authUid}`,
+            category: 'missing_mappings',
+            severity: 'warning',
+            title: `Out-of-sync mapping in /users/${authUid}`,
+            description: `/users/${authUid} points to studentDbId="${uProfile.studentDbId || 'none'}", rfidUID="${uProfile.rfidUID || 'none'}" instead of "${dbKey}" / "${normRfid}".`,
+            path: `/users/${authUid}`,
+            studentDbId: dbKey,
+            authUid,
+            rfidUID: normRfid,
+            canAutoRepair: true,
+            repairAction: 'Sync studentDbId & rfidUID onto /users/{authUid}',
+          });
+        }
+      }
+
+      if (!aMap || aMap.studentDbId !== dbKey) {
+        missingMappings++;
+        issues.push({
+          id: `missing_a2s_${authUid}`,
+          category: 'missing_mappings',
+          severity: 'critical',
+          title: `Missing or stale /auth_to_student/${authUid}`,
+          description: `Auth-to-student index for ${st.name || dbKey} (${authUid}) is ${!aMap ? 'missing' : `pointing to "${aMap.studentDbId}"`}.`,
+          path: `/auth_to_student/${authUid}`,
+          studentDbId: dbKey,
+          authUid,
+          rfidUID: normRfid,
+          canAutoRepair: true,
+          repairAction: 'Rebuild /auth_to_student mapping',
+        });
+      }
+    }
+
+    // Check attendance entries consistency under /students/{dbKey}/attendance
+    if (st.attendance && typeof st.attendance === 'object') {
+      Object.entries(st.attendance).forEach(([dateKey, attRec]) => {
+        if (!attRec) return;
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
+          incorrectPaths++;
+          issues.push({
+            id: `bad_att_date_${dbKey}_${dateKey}`,
+            category: 'incorrect_paths',
+            severity: 'warning',
+            title: `Non-standard attendance date key "${dateKey}"`,
+            description: `Attendance under /students/${dbKey}/attendance/${dateKey} is not formatted YYYY-MM-DD.`,
+            path: `/students/${dbKey}/attendance/${dateKey}`,
+            studentDbId: dbKey,
+          });
+        }
+      });
+    } else if (authUid && st.status === 'active') {
+      missingAttendanceIssues++;
+      issues.push({
+        id: `empty_att_${dbKey}`,
+        category: 'missing_attendance',
+        severity: 'warning',
+        title: `No attendance records yet for ${st.name || dbKey}`,
+        description: `Student /students/${dbKey}/attendance is currently empty. Normal for newly enrolled students; verify recovery vault if historical scans existed under legacy paths.`,
+        path: `/students/${dbKey}/attendance`,
+        studentDbId: dbKey,
+      });
+    }
+  }
+
+  // Duplicate active RFID check
+  for (const [rfid, owners] of Object.entries(rfidOwners)) {
+    if (owners.length > 1) {
+      invalidRfids++;
+      issues.push({
+        id: `dup_rfid_${rfid}`,
+        category: 'invalid_rfid',
+        severity: 'critical',
+        title: `Duplicate RFID card ${rfid} across ${owners.length} students`,
+        description: `Card ${rfid} is assigned to multiple active students: ${owners.join(', ')}. Reassign unique RFID cards in Student Directory.`,
+        path: `/rfid_to_student/${rfid}`,
+        rfidUID: rfid,
+      });
+    }
+  }
+
+  // 4. Inspect /users entries pointing to missing students or invalid roles
+  for (const [uid, u] of Object.entries(usersMap || {})) {
+    if (!u || uid === CONFIGURED_ADMIN_UID) continue;
+    if (u.role !== 'admin' && u.role !== 'student') {
+      incorrectRoles++;
+      issues.push({
+        id: `invalid_user_role_${uid}`,
+        category: 'incorrect_roles',
+        severity: 'critical',
+        title: `Invalid role on /users/${uid}`,
+        description: `User ${u.email || uid} has invalid role "${String(u.role || 'undefined')}".`,
+        path: `/users/${uid}`,
+        authUid: uid,
+      });
+    }
+    if (u.role !== 'admin') {
+      const targetDbId = (u.studentDbId || '').trim();
+      const isLinked = Boolean(targetDbId && studentsMap[targetDbId]);
+      if (!isLinked) {
+        unlinkedUserProfiles.push({
+          uid,
+          email: u.email,
+          name: u.name,
+          role: u.role,
+          studentDbId: u.studentDbId,
+          rfidUID: u.rfidUID,
+          rollNumber: u.rollNumber,
+        });
+        missingMappings++;
+        issues.push({
+          id: `orphan_user_${uid}`,
+          category: 'missing_mappings',
+          severity: 'critical',
+          title: `User ${u.email || uid} points to missing student record`,
+          description: `/users/${uid} has studentDbId="${targetDbId || 'none'}", which does not exist in /students. Link it safely via Manual Auth Linking.`,
+          path: `/users/${uid}`,
+          authUid: uid,
+          studentDbId: targetDbId || undefined,
+          rfidUID: u.rfidUID,
+        });
+      }
+    }
+  }
+
+  // 5. Legacy paths & unregistered recovery checks
+  const legacyCount = Object.values(legacyAttendanceMap || {}).reduce(
+    (sum: number, dayObj: any) => sum + (dayObj && typeof dayObj === 'object' ? Object.keys(dayObj).length : 0),
+    0
+  );
+  if (legacyCount > 0) {
+    incorrectPaths++;
+    issues.push({
+      id: 'legacy_root_attendance',
+      category: 'incorrect_paths',
+      severity: 'warning',
+      title: `${legacyCount} attendance record(s) still at legacy /attendance path`,
+      description: `Records at /attendance/{DATE}/{UID} should be migrated into /students/{studentDbId}/attendance/{DATE}.`,
+      path: '/attendance',
+    });
+  }
+
+  const legacySaCount = Object.keys(legacyStudentsAttendanceMap || {}).length;
+  if (legacySaCount > 0) {
+    incorrectPaths++;
+    issues.push({
+      id: 'legacy_students_attendance',
+      category: 'incorrect_paths',
+      severity: 'warning',
+      title: `Legacy /students_attendance entries detected (${legacySaCount})`,
+      description: `Old entries remain under /students_attendance.`,
+      path: '/students_attendance',
+    });
+  }
+
+  const recoveryGroupsCount = Object.keys(recoveryVaultMap || {}).length;
+  if (recoveryGroupsCount > 0) {
+    missingAttendanceIssues += recoveryGroupsCount;
+    issues.push({
+      id: 'unassigned_recovery_vault',
+      category: 'missing_attendance',
+      severity: 'warning',
+      title: `${recoveryGroupsCount} unregistered RFID card group(s) in recovery vault`,
+      description: `Historical attendance scans waiting in /migration_recovery/unregistered_attendance can be assigned to students in Migration Center.`,
+      path: '/migration_recovery/unregistered_attendance',
+    });
+  }
+
+  return {
+    checkedAt: Date.now(),
+    adminUid,
+    adminEmail,
+    permissionChecks,
+    summary: {
+      totalStudents: Object.keys(studentsMap || {}).length,
+      totalUserProfiles: Object.keys(usersMap || {}).length,
+      totalAuthMappings: Object.keys(authToStudentMap || {}).length,
+      totalRfidMappings: Object.keys(rfidToStudentMap || {}).length,
+      missingUserProfiles,
+      incorrectRoles,
+      missingMappings,
+      ambiguousMappings,
+      invalidRfids,
+      incorrectPaths,
+      missingAttendanceIssues,
+      permissionErrors,
+    },
+    issues,
+    unlinkedUserProfiles,
+  };
+}
+
+/**
+ * Administrator-only live Firebase Validation Suite:
+ * Checks permissions, missing user profiles, roles, student mappings, RFID indexes,
+ * legacy/incorrect paths, and recovery vault status.
+ */
+export async function runDatabaseDiagnostics(): Promise<DatabaseValidationReport> {
+  const admin = await verifyAdministratorAuth();
+  const db = getFirebaseDatabase();
+  const fs = getFirebaseFirestore();
+
+  const permissionChecks: Array<{ path: string; operation: string; allowed: boolean; error?: string }> = [];
+
+  const probeRtdb = async <T = any>(path: string, fallback: T): Promise<T> => {
+    try {
+      const snap = await withTimeoutReject(get(ref(db, path)), 4500, `Timed out reading ${path}`);
+      permissionChecks.push({ path, operation: 'GET', allowed: true });
+      return (snap.exists() ? snap.val() : fallback) as T;
+    } catch (err: any) {
+      permissionChecks.push({
+        path,
+        operation: 'GET',
+        allowed: false,
+        error: err?.message || `Permission denied at ${path}`,
+      });
+      return fallback;
+    }
+  };
+
+  const [
+    studentsMap,
+    usersMap,
+    authToStudentMap,
+    rfidToStudentMap,
+    legacyAttendanceMap,
+    legacyStudentsAttendanceMap,
+    recoveryVaultMap,
+  ] = await Promise.all([
+    probeRtdb<Record<string, Student>>('/students', {}),
+    probeRtdb<Record<string, Partial<UserProfile>>>('/users', {}),
+    probeRtdb<Record<string, any>>('/auth_to_student', {}),
+    probeRtdb<Record<string, any>>('/rfid_to_student', {}),
+    probeRtdb<Record<string, any>>('/attendance', {}),
+    probeRtdb<Record<string, any>>('/students_attendance', {}),
+    probeRtdb<Record<string, any>>('/migration_recovery/unregistered_attendance', {}),
+  ]);
+
+  // Also verify /backups and Firestore users access
+  await probeRtdb('/backups', {});
+  try {
+    await withTimeoutReject(getDocs(collection(fs, 'users')), 4000, 'Timed out reading Firestore users');
+    permissionChecks.push({ path: 'firestore:/users', operation: 'LIST', allowed: true });
+  } catch (fsErr: any) {
+    permissionChecks.push({
+      path: 'firestore:/users',
+      operation: 'LIST',
+      allowed: false,
+      error: fsErr?.message || 'Permission denied reading Firestore users collection',
+    });
+  }
+
+  return evaluateDatabaseConsistency({
+    adminUid: admin.uid,
+    adminEmail: admin.email,
+    permissionChecks,
+    studentsMap,
+    usersMap,
+    authToStudentMap,
+    rfidToStudentMap,
+    legacyAttendanceMap,
+    legacyStudentsAttendanceMap,
+    recoveryVaultMap,
+  });
+}
+
+/**
+ * Safely repairs unambiguous database mapping, profile, role, and RFID index issues
+ * WITHOUT deleting any existing records or overwriting existing student/attendance data.
+ */
+export async function autoRepairDatabaseDiagnostics(): Promise<{
+  repairedCount: number;
+  ambiguousStudents: string[];
+  report: DatabaseValidationReport;
+}> {
+  const admin = await verifyAdministratorAuth();
+  const db = getFirebaseDatabase();
+  const fs = getFirebaseFirestore();
+  let repairedCount = 0;
+
+  // 1. Ensure current admin's /users/{admin.uid} exists with role: 'admin'
+  const adminUserSnap = await get(ref(db, `users/${admin.uid}`));
+  if (!adminUserSnap.exists() || adminUserSnap.val()?.role !== 'admin') {
+    const adminProfile: UserProfile = {
+      uid: admin.uid,
+      name: adminUserSnap.val()?.name || 'System Administrator',
+      email: (admin.email || adminUserSnap.val()?.email || 'admin@rfidportal.com').toLowerCase(),
+      rollNumber: adminUserSnap.val()?.rollNumber || 'ADMIN-01',
+      department: 'System Administration',
+      year: 'Staff',
+      semester: 'N/A',
+      role: 'admin',
+      rfidUID: '',
+      createdAt: adminUserSnap.val()?.createdAt || Date.now(),
+    };
+    await update(ref(db, `users/${admin.uid}`), stripUndefinedDeep(adminProfile));
+    await withTimeout(setDoc(doc(fs, 'users', admin.uid), adminProfile, { merge: true }), 2000, null).catch(() => {});
+    repairedCount++;
+  }
+
+  // 2. Run safe non-guessing reconciliation across all students and auth mappings
+  const studentsSnap = await get(ref(db, 'students'));
+  const studentsMap = (studentsSnap.exists() ? studentsSnap.val() : {}) as Record<string, Student>;
+  const { linkedCount, ambiguousStudents } = await reconcileAllStudentMappings(studentsMap);
+  repairedCount += linkedCount;
+
+  // 3. Re-normalize any uppercase RFID / studentDbId mismatches without deleting attendance
+  for (const [dbKey, st] of Object.entries(studentsMap)) {
+    if (!st || typeof st !== 'object') continue;
+    const normRfid = (st.rfidUID || st.uid || '').trim().toUpperCase();
+    const updates: Record<string, any> = {};
+    if (st.studentDbId !== dbKey) updates.studentDbId = dbKey;
+    if (normRfid && st.rfidUID !== normRfid) updates.rfidUID = normRfid;
+    if (normRfid && st.uid !== normRfid) updates.uid = normRfid;
+    if (Object.keys(updates).length > 0) {
+      await update(ref(db, `students/${dbKey}`), updates);
+      repairedCount++;
+    }
+  }
+
+  const report = await runDatabaseDiagnostics();
+  return { repairedCount, ambiguousStudents, report };
 }
 
 

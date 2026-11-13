@@ -13,13 +13,13 @@ import {
   getActiveFirebaseConfig, 
   refreshAdminToken,
   getUserProfile,
-  lookupStudentInfo,
+  classifyFirebaseError,
   sendPasswordReset,
   updateUserPassword,
   CONFIGURED_ADMIN_UID,
-  withTimeout 
+  withTimeoutReject
 } from '../services/firebase';
-import { AppUser, UserRole, AuthStatus } from '../types';
+import { AppUser, UserRole, AuthStatus, DbDiagnosticCode } from '../types';
 
 interface AuthContextType {
   user: AppUser | null;
@@ -27,6 +27,8 @@ interface AuthContextType {
   statusMessage: string | null;
   loading: boolean;
   authError: string | null;
+  authDiagnosticCode: DbDiagnosticCode | null;
+  authDiagnosticPath: string | null;
   profileMissing: boolean;
   login: (email: string, pass: string, rememberMe?: boolean) => Promise<{ success: boolean; role?: UserRole; error?: string }>;
   logout: () => Promise<void>;
@@ -44,10 +46,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [authStatus, setAuthStatus] = useState<AuthStatus>('initializing');
   const [statusMessage, setStatusMessage] = useState<string | null>('Initializing portal security...');
   const [authError, setAuthError] = useState<string | null>(null);
+  const [authDiagnosticCode, setAuthDiagnosticCode] = useState<DbDiagnosticCode | null>(null);
+  const [authDiagnosticPath, setAuthDiagnosticPath] = useState<string | null>(null);
   const [profileMissing, setProfileMissing] = useState(false);
 
   const listenerRegisteredRef = useRef(false);
   const activeFirebaseUserRef = useRef<FirebaseUser | null>(null);
+  const lastResolveErrorRef = useRef<string | null>(null);
+  const inFlightResolveRef = useRef<Map<string, Promise<AppUser | null>>>(new Map());
 
   const config = getActiveFirebaseConfig();
   const isFirebaseConfigured = Boolean(config.apiKey && config.projectId);
@@ -62,119 +68,118 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   /**
-   * Resolve user profile from Firestore / database with timeout and strict validation
+   * Resolve user profile dynamically from RTDB /users/{authUid}, /auth_to_student/{authUid},
+   * Firestore users/{authUid}, and scoped /students/{studentDbId}.
+   * Deduplicates concurrent calls for the same Firebase UID (e.g., login + onAuthStateChanged).
    */
-  const resolveProfileForUser = useCallback(async (fbUser: FirebaseUser): Promise<AppUser | null> => {
-    setAuthStatus('loading_profile');
-    setStatusMessage('Loading your dashboard...');
-    setProfileMissing(false);
-
-    try {
-      // Fast timeout protected profile fetch
-      let profile = await withTimeout(
-        getUserProfile(fbUser.uid, fbUser.email),
-        4000,
-        null
-      );
-
-      // Fail-safe student profile fallback via lookupStudentInfo
-      if (!profile || !profile.role) {
-        const studentInfo = lookupStudentInfo(fbUser.email || '') || lookupStudentInfo(fbUser.uid);
-        if (studentInfo) {
-          profile = {
-            uid: fbUser.uid,
-            name: studentInfo.name,
-            email: fbUser.email || '',
-            rollNumber: studentInfo.studentId,
-            department: studentInfo.department,
-            year: 'Final Year',
-            semester: 'Semester 8',
-            role: 'student',
-            rfidUID: studentInfo.rfidUID,
-            createdAt: Date.now(),
-          };
-        }
-      }
-
-      // Ensure existing student profiles have valid rfidUID and studentId mapped
-      if (profile && profile.role === 'student') {
-        const studentInfo = lookupStudentInfo(profile.rfidUID || '') || 
-                            lookupStudentInfo(profile.rollNumber || '') || 
-                            lookupStudentInfo(fbUser.email || '') || 
-                            lookupStudentInfo(fbUser.uid);
-        if (studentInfo) {
-          if (!profile.rfidUID) profile.rfidUID = studentInfo.rfidUID;
-          if (!profile.rollNumber) profile.rollNumber = studentInfo.studentId;
-          if (!profile.name) profile.name = studentInfo.name;
-          if (!profile.department) profile.department = studentInfo.department;
-        }
-      }
-
-      if (profile && (profile.role === 'admin' || profile.role === 'student')) {
-        const studentInfo = profile.role === 'student'
-          ? (lookupStudentInfo(profile.rfidUID || '') || lookupStudentInfo(profile.rollNumber || '') || lookupStudentInfo(fbUser.email || '') || lookupStudentInfo(fbUser.uid))
-          : null;
-
-        const resolvedRfid = profile.role === 'student'
-          ? (profile.rfidUID || studentInfo?.rfidUID || '').trim().toUpperCase()
-          : undefined;
-
-        const resolvedRoll = profile.rollNumber || (profile.role === 'student' ? studentInfo?.studentId : undefined);
-
-        const appUser: AppUser = {
-          uid: fbUser.uid,
-          email: fbUser.email,
-          displayName: profile.name || fbUser.displayName || studentInfo?.name || fbUser.email?.split('@')[0] || (profile.role === 'admin' ? 'Administrator' : 'Student'),
-          role: profile.role,
-          rfidUID: resolvedRfid || undefined,
-          studentId: resolvedRoll || undefined,
-          rollNumber: resolvedRoll || undefined,
-          department: profile.department || studentInfo?.department,
-          year: profile.year,
-          semester: profile.semester,
-          phone: profile.phone,
-          provider: 'firebase',
-        };
-
-        setUser(appUser);
-        setAuthStatus('authenticated');
-        setStatusMessage(null);
-        setAuthError(null);
-        return appUser;
-      }
-
-      // Check if admin by UID directly
-      if (fbUser.uid === CONFIGURED_ADMIN_UID) {
-        const adminUser: AppUser = {
-          uid: fbUser.uid,
-          email: fbUser.email,
-          displayName: 'System Administrator',
-          role: 'admin',
-          provider: 'firebase',
-        };
-        setUser(adminUser);
-        setAuthStatus('authenticated');
-        setStatusMessage(null);
-        setAuthError(null);
-        return adminUser;
-      }
-
-      // Profile does not exist in Firestore or database
-      console.warn(`User ${fbUser.email} (${fbUser.uid}) exists in Auth but has no registered profile.`);
-      setUser(null);
-      setProfileMissing(true);
-      setAuthStatus('error');
-      setStatusMessage(null);
-      setAuthError('Your account exists, but your student profile has not been configured. Contact your administrator.');
-      return null;
-    } catch (err: any) {
-      console.error('Error in profile resolution:', err);
-      setUser(null);
-      setAuthStatus('error');
-      setStatusMessage(null);
-      setAuthError(err.message || 'Unable to connect to profile database. Please check your internet connection.');
-      return null;
+  const resolveProfileForUser = useCallback((fbUser: FirebaseUser): Promise<AppUser | null> => {
+    const existingPromise = inFlightResolveRef.current.get(fbUser.uid);
+    if (existingPromise) {
+      return existingPromise;
     }
+
+    const promise = (async (): Promise<AppUser | null> => {
+      setAuthStatus('loading_profile');
+      setStatusMessage('Reading profile & verifying role...');
+      setProfileMissing(false);
+      setAuthDiagnosticCode(null);
+      setAuthDiagnosticPath(null);
+      lastResolveErrorRef.current = null;
+
+      try {
+        const profile = await withTimeoutReject(
+          getUserProfile(fbUser.uid, fbUser.email),
+          8500,
+          'Timed out connecting to Firebase profile database.'
+        );
+
+        if (profile && (profile.role === 'admin' || profile.role === 'student')) {
+          const resolvedRfid = profile.role === 'student'
+            ? (profile.rfidUID || '').trim().toUpperCase()
+            : undefined;
+          const resolvedStudentDbId = profile.role === 'student'
+            ? (profile.studentDbId || resolvedRfid || '').trim()
+            : undefined;
+          const resolvedRoll = profile.rollNumber || undefined;
+
+          const appUser: AppUser = {
+            uid: fbUser.uid,
+            studentDbId: resolvedStudentDbId || undefined,
+            email: fbUser.email,
+            displayName:
+              profile.name ||
+              fbUser.displayName ||
+              fbUser.email?.split('@')[0] ||
+              (profile.role === 'admin' ? 'Administrator' : 'Student'),
+            role: profile.role,
+            rfidUID: resolvedRfid || undefined,
+            studentId: resolvedRoll,
+            rollNumber: resolvedRoll,
+            department: profile.department,
+            year: profile.year,
+            semester: profile.semester,
+            phone: profile.phone,
+            provider: 'firebase',
+          };
+
+          setUser(appUser);
+          setAuthStatus('authenticated');
+          setStatusMessage(null);
+          setAuthError(null);
+          setAuthDiagnosticCode('connected');
+          setAuthDiagnosticPath(null);
+          return appUser;
+        }
+
+        if (fbUser.uid === CONFIGURED_ADMIN_UID) {
+          const adminUser: AppUser = {
+            uid: fbUser.uid,
+            email: fbUser.email,
+            displayName: 'System Administrator',
+            role: 'admin',
+            provider: 'firebase',
+          };
+          setUser(adminUser);
+          setAuthStatus('authenticated');
+          setStatusMessage(null);
+          setAuthError(null);
+          setAuthDiagnosticCode('connected');
+          setAuthDiagnosticPath(null);
+          return adminUser;
+        }
+
+        const missingPath = `/users/${fbUser.uid}`;
+        const notRegisteredMsg = `Your account (${fbUser.email || fbUser.uid}) is authenticated, but no user profile exists at ${missingPath}. Ask an administrator to link your account.`;
+        console.warn(`User ${fbUser.email} (${fbUser.uid}) exists in Auth but has no registered profile.`);
+        setUser(null);
+        setProfileMissing(true);
+        setAuthDiagnosticCode('not_registered');
+        setAuthDiagnosticPath(missingPath);
+        setAuthStatus('error');
+        setStatusMessage(null);
+        setAuthError(notRegisteredMsg);
+        lastResolveErrorRef.current = notRegisteredMsg;
+        return null;
+      } catch (err: any) {
+        console.error('Error in profile resolution:', err);
+        const diag = classifyFirebaseError(err);
+        const errPath = err?.path || diag.path || `/users/${fbUser.uid}`;
+        setUser(null);
+        setAuthStatus('error');
+        setStatusMessage(null);
+        setAuthDiagnosticCode(diag.code);
+        setAuthDiagnosticPath(errPath);
+        setProfileMissing(diag.code === 'not_registered' || diag.code === 'mapping_missing');
+        setAuthError(err?.message || diag.message);
+        lastResolveErrorRef.current = err?.message || diag.message;
+        return null;
+      } finally {
+        inFlightResolveRef.current.delete(fbUser.uid);
+      }
+    })();
+
+    inFlightResolveRef.current.set(fbUser.uid, promise);
+    return promise;
   }, []);
 
   // Single centralized onAuthStateChanged listener
@@ -193,9 +198,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (fbUser) {
           await resolveProfileForUser(fbUser);
         } else {
+          inFlightResolveRef.current.clear();
           setUser(null);
           setAuthStatus('unauthenticated');
           setStatusMessage(null);
+          setAuthDiagnosticCode(null);
+          setAuthDiagnosticPath(null);
         }
       });
     } catch (e: any) {
@@ -203,6 +211,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setUser(null);
       setAuthStatus('unauthenticated');
       setStatusMessage(null);
+      setAuthDiagnosticCode(null);
+      setAuthDiagnosticPath(null);
     }
 
     return () => {
@@ -218,16 +228,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const auth = getFirebaseAuth();
     const currentUser = auth.currentUser || activeFirebaseUserRef.current;
     if (currentUser) {
+      inFlightResolveRef.current.delete(currentUser.uid);
       setAuthError(null);
       await resolveProfileForUser(currentUser);
     } else {
       setAuthStatus('unauthenticated');
       setStatusMessage(null);
+      setAuthDiagnosticPath(null);
     }
   }, [resolveProfileForUser]);
 
   /**
-   * Sign In action with explicit step state and proper cleanup in finally
+   * Sign In action with explicit step state and proper cleanup
    */
   const login = async (
     email: string, 
@@ -235,6 +247,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     rememberMe: boolean = true
   ): Promise<{ success: boolean; role?: UserRole; error?: string }> => {
     setAuthError(null);
+    setAuthDiagnosticCode(null);
+    setAuthDiagnosticPath(null);
     setProfileMissing(false);
     setAuthStatus('authenticating');
     setStatusMessage('Authenticating your account...');
@@ -244,7 +258,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       const auth = getFirebaseAuth();
 
-      // Set persistence based on preference
       try {
         await setPersistence(
           auth, 
@@ -263,7 +276,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       activeFirebaseUserRef.current = fbUser;
 
-      // Profile retrieval step
       const appUser = await resolveProfileForUser(fbUser);
       if (appUser) {
         return { success: true, role: appUser.role };
@@ -271,7 +283,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       return {
         success: false,
-        error: 'Your account exists, but your student profile has not been configured. Contact your administrator.'
+        error:
+          lastResolveErrorRef.current ||
+          'Your account is authenticated, but your user profile or student mapping is missing. Contact your administrator.',
       };
     } catch (err: any) {
       console.warn('Firebase Auth sign in attempt result:', err?.code || err?.message);
@@ -290,7 +304,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       } else if (err.code === 'auth/too-many-requests') {
         msg = 'Too many failed login attempts. Account temporarily locked for security.';
       } else if (err.message?.toLowerCase().includes('permission') || err.code?.includes('permission')) {
-        msg = 'Your account does not have permission to access this information.';
+        msg = 'Permission denied accessing your profile in Firebase. Contact your administrator.';
       } else if (err.message) {
         msg = err.message;
       }
@@ -315,11 +329,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch (e) {
       console.warn('Sign out notice:', e);
     } finally {
+      inFlightResolveRef.current.clear();
       activeFirebaseUserRef.current = null;
       setUser(null);
       setAuthStatus('unauthenticated');
       setStatusMessage(null);
       setAuthError(null);
+      setAuthDiagnosticCode(null);
+      setAuthDiagnosticPath(null);
       setProfileMissing(false);
       try {
         window.history.replaceState(null, '', '/');
@@ -367,7 +384,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return refreshAdminToken();
   };
 
-  // Backwards-compatible loading flag for any component reading `loading`
   const loading = authStatus === 'initializing' || authStatus === 'authenticating' || authStatus === 'loading_profile';
 
   return (
@@ -378,6 +394,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         statusMessage,
         loading,
         authError,
+        authDiagnosticCode,
+        authDiagnosticPath,
         profileMissing,
         login,
         logout,

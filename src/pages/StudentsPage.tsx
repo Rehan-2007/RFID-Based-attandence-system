@@ -19,7 +19,9 @@ import {
   UserX,
   ShieldAlert,
   Link2,
-  UserCheck
+  UserCheck,
+  Trophy,
+  Flame
 } from 'lucide-react';
 import { Student } from '../types';
 import { useAttendance } from '../context/AttendanceContext';
@@ -41,7 +43,8 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
     isAfterDeadline,
     isTodayHoliday,
     attendanceDeadline,
-    retryConnection
+    retryConnection,
+    getStudentLeaderboardStats
   } = useAttendance();
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -423,6 +426,32 @@ export const StudentsPage: React.FC<StudentsPageProps> = ({ onOpenScanner }) => 
                                   <span>Unlinked</span>
                                 </span>
                               )}
+                              {(() => {
+                                const lbStats = getStudentLeaderboardStats(dbKey);
+                                if (!lbStats) return null;
+                                return (
+                                  <span
+                                    title={
+                                      lbStats.achievements.length > 0
+                                        ? `Achievements: ${lbStats.achievements.map((a) => a.title).join(', ')}`
+                                        : 'Regularity & streak summary'
+                                    }
+                                    className="inline-flex items-center gap-1.5 text-[10px] font-mono text-amber-300"
+                                  >
+                                    <Trophy className="w-2.5 h-2.5" />
+                                    <span>#{lbStats.rank}</span>
+                                    <span>·</span>
+                                    <Flame className="w-2.5 h-2.5 text-orange-400" />
+                                    <span className="text-orange-300">{lbStats.currentStreak}d</span>
+                                    {lbStats.achievements.length > 0 && (
+                                      <>
+                                        <span>·</span>
+                                        <span className="text-cyan-300">{lbStats.achievements.length} badge{lbStats.achievements.length === 1 ? '' : 's'}</span>
+                                      </>
+                                    )}
+                                  </span>
+                                );
+                              })()}
                             </div>
                           </div>
                         </div>

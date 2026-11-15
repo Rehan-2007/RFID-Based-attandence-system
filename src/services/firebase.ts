@@ -77,7 +77,12 @@ import {
   DbDiagnosticState,
   DatabaseValidationReport,
   DatabaseDiagnosticIssue,
-  UnlinkedUserProfileEntry
+  UnlinkedUserProfileEntry,
+  LeaderboardPeriod,
+  LeaderboardEntry,
+  LeaderboardSnapshot,
+  LeaderboardHistoricalSnapshot,
+  LeaderboardConfig
 } from '../types';
 import {
   getISTDateStr,
@@ -164,15 +169,15 @@ export const RTDB_SECURITY_RULES_JSON = `{
       ".indexOn": ["rfidUID", "authUid", "studentId", "email", "status"],
 
       "$studentId": {
-        ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82' || data.child('authUid').val() === auth.uid || root.child('users').child(auth.uid).child('studentDbId').val() === $studentId || root.child('users').child(auth.uid).child('rfidUID').val() === $studentId || root.child('auth_to_student').child(auth.uid).child('studentDbId').val() === $studentId || root.child('auth_to_student').child(auth.uid).val() === $studentId || (data.child('email').isString() && auth.token.email != null && data.child('email').val().toLowerCase() === auth.token.email.toLowerCase()))",
+        ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82' || data.child('authUid').val() === auth.uid || data.child('userId').val() === auth.uid || root.child('users').child(auth.uid).child('studentDbId').val() === $studentId || root.child('users').child(auth.uid).child('rfidUID').val() === $studentId || root.child('auth_to_student').child(auth.uid).child('studentDbId').val() === $studentId || root.child('auth_to_student').child(auth.uid).val() === $studentId || ((!data.child('authUid').exists() || data.child('authUid').val() === '') && data.child('email').isString() && auth.token.email != null && data.child('email').val().toLowerCase() === auth.token.email.toLowerCase()))",
         ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
 
         "attendance": {
-          ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82' || data.parent().child('authUid').val() === auth.uid || root.child('users').child(auth.uid).child('studentDbId').val() === $studentId || root.child('users').child(auth.uid).child('rfidUID').val() === $studentId || root.child('auth_to_student').child(auth.uid).child('studentDbId').val() === $studentId || root.child('auth_to_student').child(auth.uid).val() === $studentId || (data.parent().child('email').isString() && auth.token.email != null && data.parent().child('email').val().toLowerCase() === auth.token.email.toLowerCase()))",
+          ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82' || data.parent().child('authUid').val() === auth.uid || data.parent().child('userId').val() === auth.uid || root.child('users').child(auth.uid).child('studentDbId').val() === $studentId || root.child('users').child(auth.uid).child('rfidUID').val() === $studentId || root.child('auth_to_student').child(auth.uid).child('studentDbId').val() === $studentId || root.child('auth_to_student').child(auth.uid).val() === $studentId || ((!data.parent().child('authUid').exists() || data.parent().child('authUid').val() === '') && data.parent().child('email').isString() && auth.token.email != null && data.parent().child('email').val().toLowerCase() === auth.token.email.toLowerCase()))",
           ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
 
           "$date": {
-            ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82' || data.parent().parent().child('authUid').val() === auth.uid || root.child('users').child(auth.uid).child('studentDbId').val() === $studentId || root.child('users').child(auth.uid).child('rfidUID').val() === $studentId || root.child('auth_to_student').child(auth.uid).child('studentDbId').val() === $studentId || root.child('auth_to_student').child(auth.uid).val() === $studentId || (data.parent().parent().child('email').isString() && auth.token.email != null && data.parent().parent().child('email').val().toLowerCase() === auth.token.email.toLowerCase()))",
+            ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82' || data.parent().parent().child('authUid').val() === auth.uid || data.parent().parent().child('userId').val() === auth.uid || root.child('users').child(auth.uid).child('studentDbId').val() === $studentId || root.child('users').child(auth.uid).child('rfidUID').val() === $studentId || root.child('auth_to_student').child(auth.uid).child('studentDbId').val() === $studentId || root.child('auth_to_student').child(auth.uid).val() === $studentId || ((!data.parent().parent().child('authUid').exists() || data.parent().parent().child('authUid').val() === '') && data.parent().parent().child('email').isString() && auth.token.email != null && data.parent().parent().child('email').val().toLowerCase() === auth.token.email.toLowerCase()))",
             ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || (auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82' && data.parent().parent().exists() && data.parent().parent().child('status').val() === 'active' && data.parent().parent().child('isSuspended').val() !== true && (!data.exists() || data.child('isOverridden').val() !== true)))",
             ".validate": "newData.hasChildren(['date', 'status', 'time', 'timestamp'])"
           }
@@ -186,8 +191,34 @@ export const RTDB_SECURITY_RULES_JSON = `{
     },
 
     "settings": {
-      ".read": "auth != null",
-      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
+      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+      "attendance": {
+        ".read": "auth != null",
+        ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
+      },
+      "aggregates": {
+        ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+        ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
+      },
+      "leaderboard": {
+        ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+        ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+        "config": {
+          ".read": "auth != null",
+          ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+          ".validate": "newData.hasChildren(['enabled']) && newData.child('enabled').isBoolean()"
+        },
+        "snapshots": {
+          ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || root.child('settings').child('leaderboard').child('config').child('enabled').val() !== false)",
+          ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
+        },
+        "history": {
+          ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || root.child('settings').child('leaderboard').child('config').child('enabled').val() !== false)",
+          ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+          ".indexOn": ["snapshotDate", "updatedAt"]
+        }
+      }
     },
 
     "users": {
@@ -240,7 +271,7 @@ export const RTDB_SECURITY_RULES_JSON = `{
       ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
       ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
       "$studentId": {
-        ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || root.child('students').child($studentId).child('authUid').val() === auth.uid || root.child('users').child(auth.uid).child('studentDbId').val() === $studentId || root.child('users').child(auth.uid).child('rfidUID').val() === $studentId || root.child('auth_to_student').child(auth.uid).child('studentDbId').val() === $studentId || root.child('auth_to_student').child(auth.uid).val() === $studentId || (root.child('students').child($studentId).child('email').isString() && auth.token.email != null && root.child('students').child($studentId).child('email').val().toLowerCase() === auth.token.email.toLowerCase()))"
+        ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || root.child('students').child($studentId).child('authUid').val() === auth.uid || root.child('students').child($studentId).child('userId').val() === auth.uid || root.child('users').child(auth.uid).child('studentDbId').val() === $studentId || root.child('users').child(auth.uid).child('rfidUID').val() === $studentId || root.child('auth_to_student').child(auth.uid).child('studentDbId').val() === $studentId || root.child('auth_to_student').child(auth.uid).val() === $studentId || ((!root.child('students').child($studentId).child('authUid').exists() || root.child('students').child($studentId).child('authUid').val() === '') && root.child('students').child($studentId).child('email').isString() && auth.token.email != null && root.child('students').child($studentId).child('email').val().toLowerCase() === auth.token.email.toLowerCase()))"
       }
     },
 
@@ -296,13 +327,13 @@ export const RTDB_SECURITY_RULES_JSON = `{
 }`;
 
 export const DEFAULT_FIREBASE_CONFIG: FirebaseConfigState = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || PROJECT_FIREBASE_API_KEY,
+  apiKey: import.meta.env?.VITE_FIREBASE_API_KEY || PROJECT_FIREBASE_API_KEY,
   authDomain: 'rfid-attendance-system-5fccd.firebaseapp.com',
   databaseURL: CONFIGURED_DATABASE_URL,
   projectId: CONFIGURED_PROJECT_ID,
   storageBucket: 'rfid-attendance-system-5fccd.firebasestorage.app',
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '',
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || '',
+  messagingSenderId: import.meta.env?.VITE_FIREBASE_MESSAGING_SENDER_ID || '',
+  appId: import.meta.env?.VITE_FIREBASE_APP_ID || '',
 };
 
 // In-memory cache of students fetched dynamically from Firebase RTDB (/students/{studentDbId})
@@ -670,23 +701,41 @@ export async function resolveStudentByAnyId(
 }
 
 
+function normalizeDatabaseUrl(url?: string | null): string {
+  const cleaned = (url || '').trim().replace(/\/+$/, '');
+  if (!cleaned || !/^https:\/\/[a-z0-9-]+\.firebaseio\.com$/i.test(cleaned) && !/^https:\/\/[a-z0-9.-]+\.firebasedatabase\.app$/i.test(cleaned)) {
+    return DEFAULT_FIREBASE_CONFIG.databaseURL;
+  }
+  return cleaned;
+}
+
 export function getActiveFirebaseConfig(): FirebaseConfigState {
   try {
     if (typeof localStorage !== 'undefined') {
       const stored = localStorage.getItem(STORAGE_KEY_FIREBASE_CONFIG);
       if (stored) {
         const parsed = JSON.parse(stored);
+        const merged: FirebaseConfigState = {
+          ...DEFAULT_FIREBASE_CONFIG,
+          ...parsed,
+          projectId: (parsed.projectId || DEFAULT_FIREBASE_CONFIG.projectId).trim(),
+          authDomain: (parsed.authDomain || DEFAULT_FIREBASE_CONFIG.authDomain).trim(),
+          databaseURL: normalizeDatabaseUrl(parsed.databaseURL),
+        };
         // Ensure apiKey is never empty or placeholder
-        if (!parsed.apiKey || parsed.apiKey === 'AIzaSyPlaceholderClientInitialKey00') {
-          parsed.apiKey = DEFAULT_FIREBASE_CONFIG.apiKey;
+        if (!merged.apiKey || merged.apiKey === 'AIzaSyPlaceholderClientInitialKey00') {
+          merged.apiKey = DEFAULT_FIREBASE_CONFIG.apiKey;
         }
-        return { ...DEFAULT_FIREBASE_CONFIG, ...parsed };
+        return merged;
       }
     }
   } catch (e) {
     console.warn('Failed reading stored Firebase config', e);
   }
-  return DEFAULT_FIREBASE_CONFIG;
+  return {
+    ...DEFAULT_FIREBASE_CONFIG,
+    databaseURL: normalizeDatabaseUrl(DEFAULT_FIREBASE_CONFIG.databaseURL),
+  };
 }
 
 export function resetFirebaseInstances() {
@@ -697,8 +746,15 @@ export function resetFirebaseInstances() {
 }
 
 export function saveActiveFirebaseConfig(config: FirebaseConfigState) {
+  const sanitized: FirebaseConfigState = {
+    ...config,
+    projectId: (config.projectId || DEFAULT_FIREBASE_CONFIG.projectId).trim(),
+    authDomain: (config.authDomain || DEFAULT_FIREBASE_CONFIG.authDomain).trim(),
+    databaseURL: normalizeDatabaseUrl(config.databaseURL),
+    apiKey: (config.apiKey || DEFAULT_FIREBASE_CONFIG.apiKey).trim(),
+  };
   if (typeof localStorage !== 'undefined') {
-    localStorage.setItem(STORAGE_KEY_FIREBASE_CONFIG, JSON.stringify(config));
+    localStorage.setItem(STORAGE_KEY_FIREBASE_CONFIG, JSON.stringify(sanitized));
   }
   resetFirebaseInstances();
 }
@@ -709,17 +765,32 @@ let dbInstance: Database | null = null;
 let firestoreInstance: Firestore | null = null;
 
 export function getFirebaseApp(): FirebaseApp {
-  if (appInstance) return appInstance;
-
   const config = getActiveFirebaseConfig();
+  if (appInstance) {
+    const opts = appInstance.options || {};
+    if (opts.projectId === config.projectId && normalizeDatabaseUrl(opts.databaseURL) === config.databaseURL) {
+      return appInstance;
+    }
+    resetFirebaseInstances();
+  }
+
   const existingApps = getApps();
-  if (existingApps.length > 0) {
-    appInstance = existingApps[0];
+  const matchingExisting = existingApps.find((a) => {
+    const opts = a.options || {};
+    return opts.projectId === config.projectId && normalizeDatabaseUrl(opts.databaseURL) === config.databaseURL;
+  });
+
+  if (matchingExisting) {
+    appInstance = matchingExisting;
   } else {
-    appInstance = initializeApp({
-      ...config,
-      apiKey: config.apiKey || PROJECT_FIREBASE_API_KEY,
-    });
+    const appName = existingApps.length === 0 ? undefined : `rfid_app_${config.projectId}`;
+    appInstance = initializeApp(
+      {
+        ...config,
+        apiKey: config.apiKey || PROJECT_FIREBASE_API_KEY,
+      },
+      appName
+    );
   }
   return appInstance;
 }
@@ -735,7 +806,7 @@ export function getFirebaseDatabase(): Database {
   if (dbInstance) return dbInstance;
   const app = getFirebaseApp();
   const config = getActiveFirebaseConfig();
-  dbInstance = getDatabase(app, config.databaseURL);
+  dbInstance = getDatabase(app, normalizeDatabaseUrl(config.databaseURL));
   return dbInstance;
 }
 
@@ -1063,6 +1134,13 @@ export async function saveStudent(student: Student): Promise<Student> {
 
   if (mergedStudent.authUid) {
     try { await set(ref(db, `rfid_to_uid/${newRfid}`), mergedStudent.authUid); } catch {}
+    let preservedCreatedAt = Date.now();
+    try {
+      const existingUserSnap = await withTimeout(get(ref(db, `users/${mergedStudent.authUid}/createdAt`)), 2000, null);
+      if (existingUserSnap && existingUserSnap.exists && existingUserSnap.exists() && typeof existingUserSnap.val() === 'number') {
+        preservedCreatedAt = existingUserSnap.val();
+      }
+    } catch {}
     const userPayload: UserProfile = stripUndefinedDeep({
       uid: mergedStudent.authUid,
       studentDbId,
@@ -1075,10 +1153,10 @@ export async function saveStudent(student: Student): Promise<Student> {
       role: 'student',
       rfidUID: newRfid,
       phone: mergedStudent.phone || '',
-      createdAt: Date.now(),
+      createdAt: preservedCreatedAt,
     });
     try {
-      await set(ref(db, `users/${mergedStudent.authUid}`), userPayload);
+      await update(ref(db, `users/${mergedStudent.authUid}`), userPayload);
       await set(
         ref(db, `auth_to_student/${mergedStudent.authUid}`),
         stripUndefinedDeep({
@@ -1091,7 +1169,9 @@ export async function saveStudent(student: Student): Promise<Student> {
         })
       );
       await withTimeout(setDoc(doc(fs, 'users', mergedStudent.authUid), userPayload, { merge: true }), 2000, null);
-    } catch {}
+    } catch (syncErr) {
+      console.warn('Notice synchronizing linked student user profile:', syncErr);
+    }
   }
 
   return mergedStudent;
@@ -1706,10 +1786,7 @@ export async function resetAttendanceData(
 export async function registerStudentAccount(
   input: StudentRegistrationInput
 ): Promise<{ authUid: string; student: Student }> {
-  const adminAuth = getFirebaseAuth();
-  if (!adminAuth.currentUser) {
-    throw new Error('Unauthorized: Must be logged in as Administrator to create student accounts.');
-  }
+  await verifyAdministratorAuth();
 
   const trimmedEmail = input.email.trim().toLowerCase();
   const trimmedRfid = input.rfidUID.trim().toUpperCase();
@@ -1773,7 +1850,7 @@ export async function registerStudentAccount(
   const secondaryApp = initializeApp(
     {
       ...config,
-      apiKey: config.apiKey || import.meta.env.VITE_FIREBASE_API_KEY || PROJECT_FIREBASE_API_KEY,
+      apiKey: config.apiKey || import.meta.env?.VITE_FIREBASE_API_KEY || PROJECT_FIREBASE_API_KEY,
     },
     secondaryAppName
   );
@@ -1801,6 +1878,7 @@ export async function registerStudentAccount(
     }
   }
 
+  const nowTs = Date.now();
   const userProfile: UserProfile = stripUndefinedDeep({
     uid: authUid,
     studentDbId,
@@ -1813,7 +1891,7 @@ export async function registerStudentAccount(
     role: 'student',
     rfidUID: trimmedRfid,
     phone: input.phone || '',
-    createdAt: Date.now(),
+    createdAt: nowTs,
   });
 
   const studentRecord: Student = stripUndefinedDeep({
@@ -1828,48 +1906,58 @@ export async function registerStudentAccount(
     email: trimmedEmail,
     phone: input.phone || '',
     status: 'active',
-    registeredAt: new Date().toISOString(),
+    registeredAt: new Date(nowTs).toISOString(),
     authUid,
   });
 
-  // Persist universal bidirectional mappings across RTDB & Firestore
-  await runRtdbOp('SET', `/students/${studentDbId}`, () =>
-    set(ref(db, `students/${studentDbId}`), studentRecord)
-  );
-  await runRtdbOp('SET', `/users/${authUid}`, () =>
-    set(ref(db, `users/${authUid}`), userProfile)
-  );
-  await runRtdbOp('SET', `/auth_to_student/${authUid}`, () =>
-    set(
-      ref(db, `auth_to_student/${authUid}`),
-      stripUndefinedDeep({
-        authUid,
-        studentDbId,
-        rfidUID: trimmedRfid,
-        rollNumber: trimmedRoll,
-        email: trimmedEmail,
-        updatedAt: Date.now(),
-      })
-    )
-  );
-  await runRtdbOp('SET', `/rfid_to_student/${trimmedRfid}`, () =>
-    set(
-      ref(db, `rfid_to_student/${trimmedRfid}`),
-      stripUndefinedDeep({
-        rfidUID: trimmedRfid,
-        studentDbId,
-        authUid,
-        rollNumber: trimmedRoll,
-        active: true,
-        updatedAt: Date.now(),
-      })
-    )
-  );
+  const authToStudentPayload = stripUndefinedDeep({
+    authUid,
+    studentDbId,
+    rfidUID: trimmedRfid,
+    rollNumber: trimmedRoll,
+    email: trimmedEmail,
+    updatedAt: nowTs,
+  });
 
+  const rfidToStudentPayload = stripUndefinedDeep({
+    rfidUID: trimmedRfid,
+    studentDbId,
+    authUid,
+    rollNumber: trimmedRoll,
+    active: true,
+    updatedAt: nowTs,
+  });
+
+  // Persist universal bidirectional mappings atomically across RTDB & Firestore
   try {
-    await set(ref(db, `rfid_to_uid/${trimmedRfid}`), authUid);
+    await runRtdbOp('UPDATE', '/students+/users+/auth_to_student+/rfid_to_student', () =>
+      update(ref(db), {
+        [`students/${studentDbId}`]: studentRecord,
+        [`users/${authUid}`]: userProfile,
+        [`auth_to_student/${authUid}`]: authToStudentPayload,
+        [`rfid_to_student/${trimmedRfid}`]: rfidToStudentPayload,
+        [`rfid_to_uid/${trimmedRfid}`]: authUid,
+      })
+    );
   } catch {
-    // Non-blocking legacy index sync
+    // Scoped fallback writes if root multi-path update is restricted
+    await runRtdbOp('SET', `/students/${studentDbId}`, () =>
+      set(ref(db, `students/${studentDbId}`), studentRecord)
+    );
+    await runRtdbOp('SET', `/users/${authUid}`, () =>
+      set(ref(db, `users/${authUid}`), userProfile)
+    );
+    await runRtdbOp('SET', `/auth_to_student/${authUid}`, () =>
+      set(ref(db, `auth_to_student/${authUid}`), authToStudentPayload)
+    );
+    await runRtdbOp('SET', `/rfid_to_student/${trimmedRfid}`, () =>
+      set(ref(db, `rfid_to_student/${trimmedRfid}`), rfidToStudentPayload)
+    );
+    try {
+      await set(ref(db, `rfid_to_uid/${trimmedRfid}`), authUid);
+    } catch {
+      // Non-blocking legacy index sync
+    }
   }
 
   try {
@@ -2303,8 +2391,22 @@ export async function getUserProfile(
   email?: string | null
 ): Promise<UserProfile | null> {
   const normalizedEmail = email?.trim().toLowerCase();
-  const db = getFirebaseDatabase();
+  const auth = getFirebaseAuth();
+
+  // Wait for Firebase Auth persistence initialization & ensure a valid ID token is attached before RTDB reads
+  try {
+    if (typeof (auth as any).authStateReady === 'function') {
+      await withTimeout((auth as any).authStateReady(), 2500, undefined);
+    }
+    const activeFbUser = auth.currentUser;
+    if (activeFbUser && activeFbUser.uid === authUid) {
+      await withTimeout(activeFbUser.getIdToken(false), 3000, '');
+    }
+  } catch {}
+
+  let db = getFirebaseDatabase();
   const fs = getFirebaseFirestore();
+  const activeConfig = getActiveFirebaseConfig();
 
   // 1. Bootstrap Administrator: still verify/ensure /users/{adminUid} exists cleanly
   if (authUid === CONFIGURED_ADMIN_UID) {
@@ -2338,48 +2440,103 @@ export async function getUserProfile(
   const permissionDeniedPaths: string[] = [];
   let authExpiredDiag: { diag: DbDiagnosticState; path: string } | null = null;
   let networkErrorDiag: { diag: DbDiagnosticState; path: string } | null = null;
+  let restVerifiedDenied = false;
 
-  // 2a. Read /users/{authUid} (primary user profile & role source)
-  try {
-    const userSnap = await withTimeoutReject(
-      get(ref(db, `users/${authUid}`)),
-      4500,
-      `Timed out reading /users/${authUid}`
-    );
-    if (userSnap.exists()) {
-      rtdbProfile = userSnap.val() as Partial<UserProfile>;
-    }
-  } catch (err: any) {
-    const diag = classifyFirebaseError(err);
-    const p = `/users/${authUid}`;
-    if (diag.code === 'auth_expired') {
-      authExpiredDiag = { diag, path: p };
-    } else if (diag.code === 'permission_denied') {
-      permissionDeniedPaths.push(p);
-    } else if (diag.code === 'disconnected') {
-      networkErrorDiag = { diag, path: p };
+  const readRtdbUserAndMapping = async (targetDb: Database) => {
+    const [uRes, mRes] = await Promise.allSettled([
+      withTimeoutReject(get(ref(targetDb, `users/${authUid}`)), 4500, `Timed out reading /users/${authUid}`),
+      withTimeoutReject(
+        get(ref(targetDb, `auth_to_student/${authUid}`)),
+        4000,
+        `Timed out reading /auth_to_student/${authUid}`
+      ),
+    ]);
+    return { uRes, mRes };
+  };
+
+  let { uRes, mRes } = await readRtdbUserAndMapping(db);
+
+  // If RTDB SDK threw PERMISSION_DENIED immediately after login/reload, refresh token once & probe REST to rule out WebSocket auth timing desync
+  const uPermDenied = uRes.status === 'rejected' && classifyFirebaseError(uRes.reason).code === 'permission_denied';
+  const mPermDenied = mRes.status === 'rejected' && classifyFirebaseError(mRes.reason).code === 'permission_denied';
+
+  if ((uPermDenied || mPermDenied) && auth.currentUser && auth.currentUser.uid === authUid) {
+    try {
+      const freshToken = await withTimeout(auth.currentUser.getIdToken(true), 3500, '');
+      if (freshToken) {
+        // Brief pause so RTDB WebSocket picks up refreshed auth credentials, then retry once
+        await new Promise((r) => setTimeout(r, 220));
+        ({ uRes, mRes } = await readRtdbUserAndMapping(db));
+
+        // If SDK still denies, verify directly via authenticated RTDB REST endpoint to isolate SDK desync vs deployed console rules
+        const stillUDenied = uRes.status === 'rejected' && classifyFirebaseError(uRes.reason).code === 'permission_denied';
+        const stillMDenied = mRes.status === 'rejected' && classifyFirebaseError(mRes.reason).code === 'permission_denied';
+        if (stillUDenied || stillMDenied) {
+          const baseUrl = normalizeDatabaseUrl(activeConfig.databaseURL);
+          const [restUserResp, restMapResp] = await Promise.all([
+            fetch(`${baseUrl}/users/${encodeURIComponent(authUid)}.json?auth=${encodeURIComponent(freshToken)}`).catch(() => null),
+            fetch(`${baseUrl}/auth_to_student/${encodeURIComponent(authUid)}.json?auth=${encodeURIComponent(freshToken)}`).catch(() => null),
+          ]);
+          if (restUserResp?.ok) {
+            const restUserJson = await restUserResp.json().catch(() => null);
+            if (restUserJson && typeof restUserJson === 'object') {
+              rtdbProfile = restUserJson as Partial<UserProfile>;
+            }
+            // SDK WebSocket was out of sync while live rules permitted REST read -> reset dbInstance for clean listener reconnect
+            dbInstance = null;
+            db = getFirebaseDatabase();
+          } else if (restUserResp && restUserResp.status === 401) {
+            restVerifiedDenied = true;
+          }
+          if (restMapResp?.ok) {
+            const restMapJson = await restMapResp.json().catch(() => null);
+            if (restMapJson) {
+              authMapping = typeof restMapJson === 'string' ? { studentDbId: restMapJson } : restMapJson;
+            }
+          } else if (restMapResp && restMapResp.status === 401) {
+            restVerifiedDenied = true;
+          }
+        }
+      }
+    } catch {}
+  }
+
+  // 2a. Process /users/{authUid} result
+  if (!rtdbProfile) {
+    if (uRes.status === 'fulfilled') {
+      if (uRes.value.exists()) {
+        rtdbProfile = uRes.value.val() as Partial<UserProfile>;
+      }
+    } else {
+      const diag = classifyFirebaseError(uRes.reason);
+      const p = `/users/${authUid}`;
+      if (diag.code === 'auth_expired') {
+        authExpiredDiag = { diag, path: p };
+      } else if (diag.code === 'permission_denied') {
+        permissionDeniedPaths.push(p);
+      } else if (diag.code === 'disconnected') {
+        networkErrorDiag = { diag, path: p };
+      }
     }
   }
 
-  // 2b. Read /auth_to_student/{authUid} (authoritative student mapping source)
-  try {
-    const mapSnap = await withTimeoutReject(
-      get(ref(db, `auth_to_student/${authUid}`)),
-      4000,
-      `Timed out reading /auth_to_student/${authUid}`
-    );
-    if (mapSnap.exists()) {
-      authMapping = mapSnap.val();
-    }
-  } catch (err: any) {
-    const diag = classifyFirebaseError(err);
-    const p = `/auth_to_student/${authUid}`;
-    if (diag.code === 'auth_expired' && !authExpiredDiag) {
-      authExpiredDiag = { diag, path: p };
-    } else if (diag.code === 'permission_denied') {
-      permissionDeniedPaths.push(p);
-    } else if (diag.code === 'disconnected' && !networkErrorDiag) {
-      networkErrorDiag = { diag, path: p };
+  // 2b. Process /auth_to_student/{authUid} result
+  if (!authMapping) {
+    if (mRes.status === 'fulfilled') {
+      if (mRes.value.exists()) {
+        const val = mRes.value.val();
+        authMapping = typeof val === 'string' ? { studentDbId: val } : val;
+      }
+    } else {
+      const diag = classifyFirebaseError(mRes.reason);
+      const p = `/auth_to_student/${authUid}`;
+      if (diag.code === 'auth_expired' && !authExpiredDiag) {
+        authExpiredDiag = { diag, path: p };
+      } else if (diag.code === 'permission_denied') {
+        permissionDeniedPaths.push(p);
+      } else if (diag.code === 'disconnected' && !networkErrorDiag) {
+        networkErrorDiag = { diag, path: p };
+      }
     }
   }
 
@@ -2455,9 +2612,12 @@ export async function getUserProfile(
     }
     if (permissionDeniedPaths.length > 0) {
       const primaryPath = permissionDeniedPaths.find((p) => p.startsWith('/users/')) || permissionDeniedPaths[0];
+      const liveHint = restVerifiedDenied
+        ? ` Verified against live RTDB endpoint (${activeConfig.databaseURL}): deployed Firebase Console rules currently reject authenticated read on ${primaryPath}.`
+        : '';
       throw new AuthProfileError(
         'permission_denied',
-        `Permission denied (Path: ${primaryPath}). Verify Firebase Realtime Database Rules grant authenticated users read access to their own /users/{auth.uid} and /auth_to_student/{auth.uid} profile.`,
+        `Permission denied (Path: ${primaryPath}). Verify Firebase Realtime Database Rules grant authenticated users read access to their own /users/{auth.uid} and /auth_to_student/{auth.uid} profile.${liveHint}`,
         primaryPath,
         'GET'
       );
@@ -2516,6 +2676,15 @@ export async function getUserProfile(
   }
 
   if (!studentDbId) {
+    const a2sDenied = permissionDeniedPaths.includes(`/auth_to_student/${authUid}`);
+    if (a2sDenied) {
+      throw new AuthProfileError(
+        'permission_denied',
+        `Permission denied (Path: /auth_to_student/${authUid}). Verify Firebase Realtime Database Rules grant authenticated users read access to /auth_to_student/{auth.uid}.`,
+        `/auth_to_student/${authUid}`,
+        'GET'
+      );
+    }
     throw new AuthProfileError(
       'mapping_missing',
       'Your Firebase account is authenticated, but your Student Database ID and RFID Card mapping are missing. Ask an administrator to link your account.',
@@ -6215,7 +6384,7 @@ export async function provisionAuthForExistingStudent(
   const secondaryApp = initializeApp(
     {
       ...config,
-      apiKey: config.apiKey || import.meta.env.VITE_FIREBASE_API_KEY || PROJECT_FIREBASE_API_KEY,
+      apiKey: config.apiKey || import.meta.env?.VITE_FIREBASE_API_KEY || PROJECT_FIREBASE_API_KEY,
     },
     secondaryAppName
   );
@@ -6830,5 +6999,228 @@ export async function autoRepairDatabaseDiagnostics(): Promise<{
   const report = await runDatabaseDiagnostics();
   return { repairedCount, ambiguousStudents, report };
 }
+
+// ============================================================================
+// ATTENDANCE LEADERBOARD & REGULARITY RANKING REAL-TIME SYNC (/settings/leaderboard)
+// ============================================================================
+
+const STORAGE_KEY_LEADERBOARD_CONFIG = 'rfid_leaderboard_config_v1';
+
+/**
+ * Strips any accidental sensitive attributes so shared leaderboard snapshots never leak
+ * emails, phone numbers, RFID hex codes, or Firebase Auth UIDs.
+ */
+function sanitizeLeaderboardEntryForRtdb(entry: LeaderboardEntry): LeaderboardEntry {
+  return stripUndefinedDeep({
+    studentDbId: entry.studentDbId,
+    rank: entry.rank,
+    name: entry.name,
+    studentId: entry.studentId,
+    avatar: entry.avatar,
+    department: entry.department,
+    year: entry.year,
+    semester: entry.semester,
+    presentDays: entry.presentDays,
+    totalWorkingDays: entry.totalWorkingDays,
+    absentDays: entry.absentDays,
+    attendancePercentage: entry.attendancePercentage,
+    currentStreak: entry.currentStreak,
+    longestStreak: entry.longestStreak,
+    consistencyScore: entry.consistencyScore,
+    regularityScore: entry.regularityScore,
+    achievements: Array.isArray(entry.achievements) ? entry.achievements : [],
+    isTodayPresent: Boolean(entry.isTodayPresent),
+  });
+}
+
+export function subscribeToLeaderboardConfig(
+  onSuccess: (config: LeaderboardConfig) => void,
+  onError?: (err: Error) => void
+) {
+  let localFallback: LeaderboardConfig = { enabled: true };
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const raw = localStorage.getItem(STORAGE_KEY_LEADERBOARD_CONFIG);
+      if (raw) {
+        const parsed = JSON.parse(raw) as LeaderboardConfig;
+        if (typeof parsed?.enabled === 'boolean') {
+          localFallback = parsed;
+        }
+      }
+    }
+  } catch {}
+
+  try {
+    const db = getFirebaseDatabase();
+    const cfgRef = ref(db, 'settings/leaderboard/config');
+    const unsubscribe = onValue(
+      cfgRef,
+      (snapshot: DataSnapshot) => {
+        if (snapshot.exists()) {
+          const val = snapshot.val() as LeaderboardConfig;
+          if (val && typeof val.enabled === 'boolean') {
+            try {
+              if (typeof localStorage !== 'undefined') {
+                localStorage.setItem(STORAGE_KEY_LEADERBOARD_CONFIG, JSON.stringify(val));
+              }
+            } catch {}
+            onSuccess(val);
+            return;
+          }
+        }
+        onSuccess(localFallback);
+      },
+      (error) => {
+        onSuccess(localFallback);
+        onError?.(error);
+      }
+    );
+    return () => off(cfgRef, 'value', unsubscribe);
+  } catch (error) {
+    onSuccess(localFallback);
+    onError?.(error as Error);
+    return () => {};
+  }
+}
+
+export async function saveLeaderboardConfig(
+  enabled: boolean,
+  adminEmail?: string | null
+): Promise<LeaderboardConfig> {
+  await verifyAdministratorAuth();
+  const payload: LeaderboardConfig = stripUndefinedDeep({
+    enabled: Boolean(enabled),
+    updatedAt: Date.now(),
+    updatedBy: adminEmail || 'admin',
+  });
+
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(STORAGE_KEY_LEADERBOARD_CONFIG, JSON.stringify(payload));
+    }
+  } catch {}
+
+  const db = getFirebaseDatabase();
+  await runRtdbOp('SET', '/settings/leaderboard/config', () =>
+    set(ref(db, 'settings/leaderboard/config'), payload)
+  );
+  return payload;
+}
+
+export function subscribeToLeaderboardSnapshots(
+  onSuccess: (snapshots: Partial<Record<LeaderboardPeriod, LeaderboardSnapshot>>) => void,
+  onError?: (err: Error) => void
+) {
+  try {
+    const db = getFirebaseDatabase();
+    const snapsRef = ref(db, 'settings/leaderboard/snapshots');
+    const unsubscribe = onValue(
+      snapsRef,
+      (snapshot: DataSnapshot) => {
+        const val = (snapshot.exists() ? snapshot.val() : {}) as Partial<
+          Record<LeaderboardPeriod, LeaderboardSnapshot>
+        >;
+        const normalized: Partial<Record<LeaderboardPeriod, LeaderboardSnapshot>> = {};
+        (['overall', 'weekly', 'monthly', 'semester'] as LeaderboardPeriod[]).forEach((p) => {
+          const item = val?.[p];
+          if (item && typeof item === 'object') {
+            normalized[p] = {
+              ...item,
+              entries: Array.isArray(item.entries)
+                ? item.entries
+                : item.entries && typeof item.entries === 'object'
+                  ? (Object.values(item.entries) as LeaderboardEntry[])
+                  : [],
+            };
+          }
+        });
+        onSuccess(normalized);
+      },
+      (error) => {
+        onError?.(error);
+      }
+    );
+    return () => off(snapsRef, 'value', unsubscribe);
+  } catch (error) {
+    onError?.(error as Error);
+    return () => {};
+  }
+}
+
+export function subscribeToLeaderboardHistory(
+  onSuccess: (history: LeaderboardHistoricalSnapshot[]) => void,
+  onError?: (err: Error) => void
+) {
+  try {
+    const db = getFirebaseDatabase();
+    const histRef = rtdbQuery(ref(db, 'settings/leaderboard/history'), limitToLast(30));
+    const unsubscribe = onValue(
+      histRef,
+      (snapshot: DataSnapshot) => {
+        if (!snapshot.exists()) {
+          onSuccess([]);
+          return;
+        }
+        const raw = snapshot.val() as Record<string, LeaderboardHistoricalSnapshot>;
+        const list = Object.entries(raw || {})
+          .filter(([, v]) => v && typeof v === 'object')
+          .map(([dateKey, v]): LeaderboardHistoricalSnapshot => ({
+            ...v,
+            snapshotDate: v.snapshotDate || dateKey,
+            topEntries: Array.isArray(v.topEntries)
+              ? v.topEntries
+              : v.topEntries && typeof v.topEntries === 'object'
+                ? (Object.values(v.topEntries) as LeaderboardEntry[])
+                : [],
+          }))
+          .sort((a, b) => b.snapshotDate.localeCompare(a.snapshotDate));
+        onSuccess(list);
+      },
+      (error) => {
+        onError?.(error);
+      }
+    );
+    return () => off(histRef, 'value', unsubscribe);
+  } catch (error) {
+    onError?.(error as Error);
+    return () => {};
+  }
+}
+
+export async function syncLeaderboardSnapshotsToRtdb(
+  snapshots: Record<LeaderboardPeriod, LeaderboardSnapshot>,
+  todayStr: string
+): Promise<void> {
+  await verifyAdministratorAuth();
+  const db = getFirebaseDatabase();
+
+  const updates: Record<string, any> = {};
+  (['overall', 'weekly', 'monthly', 'semester'] as LeaderboardPeriod[]).forEach((period) => {
+    const snap = snapshots[period];
+    if (!snap) return;
+    updates[`snapshots/${period}`] = stripUndefinedDeep({
+      ...snap,
+      entries: (snap.entries || []).map(sanitizeLeaderboardEntryForRtdb),
+    });
+  });
+
+  if (isValidDateStr(todayStr) && snapshots.overall) {
+    const overallSnap = snapshots.overall;
+    updates[`history/${todayStr}`] = stripUndefinedDeep({
+      snapshotDate: todayStr,
+      updatedAt: Date.now(),
+      period: 'overall',
+      totalStudents: overallSnap.totalEligibleStudents,
+      topEntries: (overallSnap.entries || []).slice(0, 20).map(sanitizeLeaderboardEntryForRtdb),
+    } satisfies LeaderboardHistoricalSnapshot);
+  }
+
+  if (Object.keys(updates).length > 0) {
+    await runRtdbOp('UPDATE', '/settings/leaderboard', () =>
+      update(ref(db, 'settings/leaderboard'), updates)
+    );
+  }
+}
+
 
 

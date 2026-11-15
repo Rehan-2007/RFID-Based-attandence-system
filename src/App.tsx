@@ -28,6 +28,7 @@ import { StudentNavbar } from './components/StudentNavbar';
 const DashboardPage = lazy(() => import('./pages/DashboardPage').then(m => ({ default: m.DashboardPage })));
 const StudentsPage = lazy(() => import('./pages/StudentsPage').then(m => ({ default: m.StudentsPage })));
 const AttendancePage = lazy(() => import('./pages/AttendancePage').then(m => ({ default: m.AttendancePage })));
+const LeaderboardPage = lazy(() => import('./pages/LeaderboardPage').then(m => ({ default: m.LeaderboardPage })));
 const ReportsPage = lazy(() => import('./pages/ReportsPage').then(m => ({ default: m.ReportsPage })));
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then(m => ({ default: m.SettingsPage })));
 const SystemResetPage = lazy(() => import('./pages/SystemResetPage').then(m => ({ default: m.SystemResetPage })));
@@ -36,6 +37,7 @@ const SystemResetPage = lazy(() => import('./pages/SystemResetPage').then(m => (
 const StudentDashboardPage = lazy(() => import('./pages/StudentDashboardPage').then(m => ({ default: m.StudentDashboardPage })));
 const StudentAttendancePage = lazy(() => import('./pages/StudentAttendancePage').then(m => ({ default: m.StudentAttendancePage })));
 const StudentCalendarPage = lazy(() => import('./pages/StudentCalendarPage').then(m => ({ default: m.StudentCalendarPage })));
+const StudentLeaderboardPage = lazy(() => import('./pages/StudentLeaderboardPage').then(m => ({ default: m.StudentLeaderboardPage })));
 const StudentProfilePage = lazy(() => import('./pages/StudentProfilePage').then(m => ({ default: m.StudentProfilePage })));
 
 /**
@@ -442,6 +444,10 @@ function AdminPortal() {
               />
             )}
 
+            {currentPage === 'leaderboard' && (
+              <LeaderboardPage />
+            )}
+
             {currentPage === 'reports' && (
               <ReportsPage />
             )}
@@ -509,6 +515,10 @@ function StudentPortal() {
 
             {currentTab === 'calendar' && (
               <StudentCalendarPage />
+            )}
+
+            {currentTab === 'leaderboard' && (
+              <StudentLeaderboardPage />
             )}
 
             {currentTab === 'profile' && (

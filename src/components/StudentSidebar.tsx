@@ -6,11 +6,13 @@ import {
   UserCircle, 
   LogOut, 
   Radio, 
-  CreditCard
+  CreditCard,
+  Trophy
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { useAttendance } from '../context/AttendanceContext';
 
-export type StudentTab = 'dashboard' | 'attendance' | 'calendar' | 'profile';
+export type StudentTab = 'dashboard' | 'attendance' | 'calendar' | 'leaderboard' | 'profile';
 
 interface StudentSidebarProps {
   currentTab: StudentTab;
@@ -26,11 +28,18 @@ export const StudentSidebar: React.FC<StudentSidebarProps> = ({
   onClose,
 }) => {
   const { user, logout } = useAuth();
+  const { leaderboardEnabled, myLeaderboardStats } = useAttendance();
 
-  const navItems: { id: StudentTab; label: string; icon: React.ReactNode }[] = [
+  const navItems: { id: StudentTab; label: string; icon: React.ReactNode; rightNote?: string }[] = [
     { id: 'dashboard', label: 'My Dashboard', icon: <LayoutDashboard className="w-4 h-4" /> },
     { id: 'attendance', label: 'Attendance Records', icon: <CalendarCheck className="w-4 h-4" /> },
     { id: 'calendar', label: 'Attendance Calendar', icon: <CalendarIcon className="w-4 h-4" /> },
+    {
+      id: 'leaderboard',
+      label: 'Attendance Leaderboard',
+      icon: <Trophy className="w-4 h-4" />,
+      rightNote: leaderboardEnabled && myLeaderboardStats ? `#${myLeaderboardStats.rank}` : undefined,
+    },
     { id: 'profile', label: 'My Profile & Security', icon: <UserCircle className="w-4 h-4" /> },
   ];
 
@@ -111,7 +120,12 @@ export const StudentSidebar: React.FC<StudentSidebarProps> = ({
                 <span className={isActive ? 'text-emerald-400' : 'text-slate-500'}>
                   {item.icon}
                 </span>
-                <span>{item.label}</span>
+                <span className="flex-1 text-left truncate">{item.label}</span>
+                {item.rightNote && (
+                  <span className="text-[11px] font-mono text-amber-300 font-semibold">
+                    {item.rightNote}
+                  </span>
+                )}
               </button>
             );
           })}

@@ -21,6 +21,11 @@ import {
   AutoMigrationStatus,
   UnregisteredAttendanceGroup,
   DbDiagnosticState,
+  LeaderboardPeriod,
+  LeaderboardEntry,
+  LeaderboardSnapshot,
+  LeaderboardHistoricalSnapshot,
+  LeaderboardConfig,
 } from '../types';
 import {
   subscribeToStudents,
@@ -79,6 +84,11 @@ import {
   DEFAULT_ATTENDANCE_DEADLINE,
   subscribeToAttendanceSettings,
   saveAttendanceSettings,
+  subscribeToLeaderboardConfig,
+  saveLeaderboardConfig,
+  subscribeToLeaderboardSnapshots,
+  subscribeToLeaderboardHistory,
+  syncLeaderboardSnapshotsToRtdb,
 } from '../services/firebase';
 import { ref, get, onValue, off, DataSnapshot } from 'firebase/database';
 import { useAuth } from './AuthContext';
@@ -90,6 +100,11 @@ import {
   isValidDeadlineHHMM,
   normalizeToISODate,
 } from '../utils/dateUtils';
+import {
+  computeLeaderboardSnapshot,
+  computeLeaderboardSignature,
+  mergeStudentLiveEntryIntoSnapshot,
+} from '../utils/leaderboardUtils';
 
 interface LiveScanEvent {
   record: AttendanceRecord;
@@ -219,6 +234,16 @@ interface AttendanceContextType {
   triggerCompleteSystemReset: (adminUid: string, adminEmail: string) => Promise<{ success: boolean; message: string; commandId: string }>;
   retryConnection: () => Promise<void>;
   refreshAttendance: () => Promise<{ success: boolean; count: number; message: string }>;
+
+  // Attendance Leaderboard & Regularity Ranking
+  leaderboardEnabled: boolean;
+  leaderboardConfig: LeaderboardConfig;
+  leaderboardSnapshots: Record<LeaderboardPeriod, LeaderboardSnapshot>;
+  leaderboardHistory: LeaderboardHistoricalSnapshot[];
+  getLeaderboardForPeriod: (period: LeaderboardPeriod) => LeaderboardSnapshot;
+  toggleLeaderboardEnabled: (enabled: boolean) => Promise<{ success: boolean; message: string }>;
+  myLeaderboardStats: LeaderboardEntry | null;
+  getStudentLeaderboardStats: (studentDbIdOrUid: string, period?: LeaderboardPeriod) => LeaderboardEntry | null;
 }
 
 const AttendanceContext = createContext<AttendanceContextType | undefined>(undefined);
@@ -263,11 +288,19 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   const [autoMigrationStatus, setAutoMigrationStatus] = useState<AutoMigrationStatus>({ status: 'idle' });
   const [unregisteredRecovery, setUnregisteredRecovery] = useState<UnregisteredAttendanceGroup[]>([]);
 
+  // Attendance Leaderboard states
+  const [leaderboardConfig, setLeaderboardConfig] = useState<LeaderboardConfig>({ enabled: true });
+  const [rtdbLeaderboardSnapshots, setRtdbLeaderboardSnapshots] = useState<
+    Partial<Record<LeaderboardPeriod, LeaderboardSnapshot>>
+  >({});
+  const [leaderboardHistory, setLeaderboardHistory] = useState<LeaderboardHistoricalSnapshot[]>([]);
+
   const autoMigrationInFlightRef = React.useRef<boolean>(false);
   const lastAutoMigrationSigRef = React.useRef<string>('');
   const authLinksSyncedRef = React.useRef<boolean>(false);
   const migrationProgressRef = React.useRef<MigrationProgress | null>(null);
   const syncedDatesSetRef = React.useRef<Set<string>>(new Set());
+  const lastLeaderboardSyncSigRef = React.useRef<string>('');
   // Incremental WeakMap cache: only newly changed Student objects re-run normalizeAttendanceRecord
   const normalizedAttendanceCacheRef = React.useRef<WeakMap<Student, Record<string, AttendanceRecord>>>(
     new WeakMap()
@@ -387,11 +420,14 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       setMigrationCheckpoint(null);
       setAutoMigrationStatus({ status: 'idle' });
       setUnregisteredRecovery([]);
+      setRtdbLeaderboardSnapshots({});
+      setLeaderboardHistory([]);
       setIsLoading(false);
       setIsDbConnected(false);
       setLastSyncedAt(null);
       dbErrorRef.current = null;
       lastAutoMigrationSigRef.current = '';
+      lastLeaderboardSyncSigRef.current = '';
       authLinksSyncedRef.current = false;
       syncedDatesSetRef.current.clear();
       migrationProgressRef.current = null;
@@ -499,6 +535,13 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
           console.warn('Working days listener error:', err?.message);
         }
       )
+    );
+
+    // Shared Leaderboard Config listener (snapshots & history attach conditionally in dedicated effect)
+    unsubs.push(
+      subscribeToLeaderboardConfig((cfg) => {
+        if (isMounted) setLeaderboardConfig(cfg);
+      })
     );
 
     if (user.role === 'admin') {
@@ -809,7 +852,7 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         }
       };
 
-      const resolvedStudentDbId = (user.studentDbId || user.rfidUID || '').trim();
+      const resolvedStudentDbId = (user.studentDbId || '').trim();
       const resolvedCardRfid = (user.rfidUID || resolvedStudentDbId).trim().toUpperCase();
 
       if (resolvedStudentDbId) {
@@ -1904,6 +1947,211 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     }
   }, [user]);
 
+  // ============================================================================
+  // REAL-TIME ATTENDANCE LEADERBOARD & REGULARITY RANKING ENGINE
+  // ============================================================================
+  useEffect(() => {
+    if (!user || (user.role !== 'admin' && !leaderboardConfig.enabled)) {
+      setRtdbLeaderboardSnapshots({});
+      setLeaderboardHistory([]);
+      return;
+    }
+
+    let active = true;
+    const unsubSnaps = subscribeToLeaderboardSnapshots((snaps) => {
+      if (active) setRtdbLeaderboardSnapshots(snaps);
+    });
+    const unsubHist = subscribeToLeaderboardHistory((hist) => {
+      if (active) setLeaderboardHistory(hist);
+    });
+
+    return () => {
+      active = false;
+      unsubSnaps();
+      unsubHist();
+    };
+  }, [user, leaderboardConfig.enabled]);
+
+  const adminComputedSnapshots = useMemo<Record<LeaderboardPeriod, LeaderboardSnapshot> | null>(() => {
+    if (user?.role !== 'admin') return null;
+    return {
+      overall: computeLeaderboardSnapshot({
+        studentsMap: students,
+        allAttendance,
+        workingDays,
+        todayStr,
+        isAfterDeadline,
+        period: 'overall',
+      }),
+      weekly: computeLeaderboardSnapshot({
+        studentsMap: students,
+        allAttendance,
+        workingDays,
+        todayStr,
+        isAfterDeadline,
+        period: 'weekly',
+      }),
+      monthly: computeLeaderboardSnapshot({
+        studentsMap: students,
+        allAttendance,
+        workingDays,
+        todayStr,
+        isAfterDeadline,
+        period: 'monthly',
+      }),
+      semester: computeLeaderboardSnapshot({
+        studentsMap: students,
+        allAttendance,
+        workingDays,
+        todayStr,
+        isAfterDeadline,
+        period: 'semester',
+      }),
+    };
+  }, [user?.role, students, allAttendance, workingDays, todayStr, isAfterDeadline]);
+
+  // Debounced auto-sync of precomputed non-PII snapshots & daily history from Admin -> /settings/leaderboard
+  useEffect(() => {
+    if (user?.role !== 'admin' || isLoading || !adminComputedSnapshots) return;
+    if (Object.keys(students).length === 0) return;
+
+    const nextSig = computeLeaderboardSignature(adminComputedSnapshots);
+    if (nextSig === lastLeaderboardSyncSigRef.current) return;
+
+    const timer = setTimeout(() => {
+      syncLeaderboardSnapshotsToRtdb(adminComputedSnapshots, todayStr)
+        .then(() => {
+          lastLeaderboardSyncSigRef.current = nextSig;
+        })
+        .catch(() => {});
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [user?.role, isLoading, adminComputedSnapshots, students, todayStr]);
+
+  const leaderboardSnapshots = useMemo<Record<LeaderboardPeriod, LeaderboardSnapshot>>(() => {
+    if (adminComputedSnapshots) {
+      return adminComputedSnapshots;
+    }
+
+    const currentStudent =
+      studentsList.find(
+        (s) =>
+          (user?.studentDbId && s.studentDbId === user.studentDbId) ||
+          (user?.rfidUID && (s.rfidUID || s.uid || '').toUpperCase() === user.rfidUID.toUpperCase()) ||
+          (user?.uid && s.authUid === user.uid)
+      ) ||
+      studentsList[0] ||
+      null;
+    const currentDbId = (currentStudent?.studentDbId || user?.studentDbId || '').trim();
+
+    const periods: LeaderboardPeriod[] = ['overall', 'weekly', 'monthly', 'semester'];
+    const result = {} as Record<LeaderboardPeriod, LeaderboardSnapshot>;
+
+    periods.forEach((p) => {
+      const sharedSnap = rtdbLeaderboardSnapshots[p];
+      if (sharedSnap) {
+        result[p] = currentStudent
+          ? mergeStudentLiveEntryIntoSnapshot({
+              snapshot: sharedSnap,
+              student: currentStudent,
+              studentDbId: currentDbId,
+              allAttendance,
+              workingDays,
+              todayStr,
+              isAfterDeadline,
+            })
+          : sharedSnap;
+      } else {
+        result[p] = computeLeaderboardSnapshot({
+          studentsMap: students,
+          allAttendance,
+          workingDays,
+          todayStr,
+          isAfterDeadline,
+          period: p,
+        });
+      }
+    });
+
+    return result;
+  }, [
+    adminComputedSnapshots,
+    rtdbLeaderboardSnapshots,
+    students,
+    studentsList,
+    user?.studentDbId,
+    user?.rfidUID,
+    user?.uid,
+    allAttendance,
+    workingDays,
+    todayStr,
+    isAfterDeadline,
+  ]);
+
+  const getLeaderboardForPeriod = useCallback(
+    (period: LeaderboardPeriod): LeaderboardSnapshot => {
+      return leaderboardSnapshots[period] || leaderboardSnapshots.overall;
+    },
+    [leaderboardSnapshots]
+  );
+
+  const myLeaderboardStats = useMemo<LeaderboardEntry | null>(() => {
+    if (!user || user.role !== 'student') return null;
+    const entries = leaderboardSnapshots.overall?.entries || [];
+    const targetDbId = (user.studentDbId || '').trim();
+    const targetRoll = (user.studentId || user.rollNumber || '').trim().toUpperCase();
+    return (
+      entries.find(
+        (e) =>
+          (targetDbId && e.studentDbId === targetDbId) ||
+          (targetRoll && (e.studentId || '').toUpperCase() === targetRoll)
+      ) || null
+    );
+  }, [user, leaderboardSnapshots]);
+
+  const getStudentLeaderboardStats = useCallback(
+    (studentDbIdOrUid: string, period: LeaderboardPeriod = 'overall'): LeaderboardEntry | null => {
+      const target = (studentDbIdOrUid || '').trim();
+      if (!target) return null;
+      const entries = leaderboardSnapshots[period]?.entries || [];
+      const resolvedDbId = resolveStudentDbIdFromMap(target, students) || target;
+      return (
+        entries.find(
+          (e) =>
+            e.studentDbId === resolvedDbId ||
+            e.studentDbId === target ||
+            (e.studentId || '').toUpperCase() === target.toUpperCase()
+        ) || null
+      );
+    },
+    [leaderboardSnapshots, students]
+  );
+
+  const toggleLeaderboardEnabled = useCallback(
+    async (enabled: boolean): Promise<{ success: boolean; message: string }> => {
+      if (user?.role !== 'admin') {
+        return { success: false, message: 'Only administrators can change leaderboard visibility.' };
+      }
+      try {
+        const saved = await saveLeaderboardConfig(enabled, user?.email || undefined);
+        setLeaderboardConfig(saved);
+        return {
+          success: true,
+          message: enabled
+            ? 'Student Attendance Leaderboard is now enabled.'
+            : 'Student Attendance Leaderboard has been disabled for students.',
+        };
+      } catch (err: any) {
+        return {
+          success: false,
+          message: err?.message || 'Failed updating leaderboard visibility setting.',
+        };
+      }
+    },
+    [user?.role, user?.email]
+  );
+
   return (
     <AttendanceContext.Provider
       value={{
@@ -1981,6 +2229,14 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         triggerCompleteSystemReset,
         retryConnection,
         refreshAttendance,
+        leaderboardEnabled: leaderboardConfig.enabled,
+        leaderboardConfig,
+        leaderboardSnapshots,
+        leaderboardHistory,
+        getLeaderboardForPeriod,
+        toggleLeaderboardEnabled,
+        myLeaderboardStats,
+        getStudentLeaderboardStats,
       }}
     >
       {children}

@@ -14,14 +14,19 @@ import {
   ShieldCheck, 
   LogOut,
   CalendarDays,
-  Building2
+  Building2,
+  Trophy,
+  Flame,
+  Award,
+  Star,
+  Gem
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useAttendance } from '../context/AttendanceContext';
 
 export const StudentProfilePage: React.FC = () => {
   const { user, changePassword, sendResetEmail, logout } = useAuth();
-  const { studentsList } = useAttendance();
+  const { studentsList, myLeaderboardStats, leaderboardEnabled } = useAttendance();
 
   const liveProfile =
     studentsList.find(
@@ -281,6 +286,95 @@ export const StudentProfilePage: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Regularity Streaks & Automatic Achievements Card */}
+      {myLeaderboardStats && (
+        <div className="p-6 rounded-3xl bg-[#0c1220] border border-slate-800 shadow-xl space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-800/80">
+            <div className="flex items-center gap-2.5">
+              <Award className="w-5 h-5 text-amber-400" />
+              <div>
+                <h3 className="text-sm font-bold text-white tracking-tight">
+                  Attendance Streaks &amp; Earned Achievements
+                </h3>
+                <p className="text-xs text-slate-400">
+                  Live regularity milestones calculated from verified working-day scans
+                </p>
+              </div>
+            </div>
+            {leaderboardEnabled && (
+              <span className="text-xs font-mono font-bold text-amber-300 tabular-nums">
+                Overall Rank #{myLeaderboardStats.rank} · Score {myLeaderboardStats.regularityScore.toFixed(1)}
+              </span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800/80">
+              <span className="text-[10px] font-mono uppercase text-slate-400 block">Current Streak</span>
+              <span className="text-lg font-bold text-orange-400 font-mono tabular-nums mt-1 flex items-center gap-1.5">
+                <Flame className="w-4 h-4" />
+                <span>{myLeaderboardStats.currentStreak}d</span>
+              </span>
+            </div>
+            <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800/80">
+              <span className="text-[10px] font-mono uppercase text-slate-400 block">Longest Streak</span>
+              <span className="text-lg font-bold text-amber-300 font-mono tabular-nums mt-1 flex items-center gap-1.5">
+                <Trophy className="w-4 h-4" />
+                <span>{myLeaderboardStats.longestStreak}d</span>
+              </span>
+            </div>
+            <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800/80">
+              <span className="text-[10px] font-mono uppercase text-slate-400 block">Present / Working</span>
+              <span className="text-lg font-bold text-white font-mono tabular-nums mt-1 block">
+                {myLeaderboardStats.presentDays} / {myLeaderboardStats.totalWorkingDays}
+              </span>
+            </div>
+            <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800/80">
+              <span className="text-[10px] font-mono uppercase text-slate-400 block">Attendance Rate</span>
+              <span className="text-lg font-bold text-emerald-400 font-mono tabular-nums mt-1 block">
+                {myLeaderboardStats.attendancePercentage.toFixed(1)}%
+              </span>
+            </div>
+          </div>
+
+          <div>
+            <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block mb-2.5">
+              Unlocked Badges ({myLeaderboardStats.achievements.length})
+            </span>
+            {myLeaderboardStats.achievements.length === 0 ? (
+              <p className="text-xs text-slate-500">
+                No achievement badges unlocked yet. Maintain consecutive working-day attendance to earn streak and regularity rewards.
+              </p>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {myLeaderboardStats.achievements.map((ach) => (
+                  <div
+                    key={ach.id}
+                    className="p-3 rounded-2xl bg-slate-950 border border-amber-400/25 flex items-start gap-2.5"
+                  >
+                    <div className="p-1.5 rounded-lg bg-slate-900 border border-slate-800 shrink-0">
+                      {ach.icon === 'gem' ? (
+                        <Gem className="w-4 h-4 text-cyan-300" />
+                      ) : ach.icon === 'flame' ? (
+                        <Flame className="w-4 h-4 text-orange-400" />
+                      ) : ach.icon === 'star' ? (
+                        <Star className="w-4 h-4 text-amber-300" />
+                      ) : (
+                        <Trophy className="w-4 h-4 text-yellow-400" />
+                      )}
+                    </div>
+                    <div>
+                      <p className="text-xs font-bold text-white">{ach.title}</p>
+                      <p className="text-[11px] text-slate-400 mt-0.5">{ach.description}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

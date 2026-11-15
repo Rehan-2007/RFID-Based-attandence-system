@@ -54,6 +54,10 @@ export const Navbar: React.FC<NavbarProps> = ({
       title: 'Live Attendance Feed',
       subtitle: 'Sub-second card detection, duplicate prevention & security logs',
     },
+    leaderboard: {
+      title: 'Attendance Leaderboard',
+      subtitle: 'Real-time student regularity rankings, daily streaks & achievement rewards',
+    },
     reports: {
       title: 'Attendance Analytics & Reports',
       subtitle: 'Daily, weekly, monthly breakdowns with Microsoft Excel CSV export',

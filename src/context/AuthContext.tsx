@@ -87,9 +87,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       lastResolveErrorRef.current = null;
 
       try {
+        try {
+          await fbUser.getIdToken(false);
+        } catch {}
         const profile = await withTimeoutReject(
           getUserProfile(fbUser.uid, fbUser.email),
-          8500,
+          10000,
           'Timed out connecting to Firebase profile database.'
         );
 
@@ -230,6 +233,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (currentUser) {
       inFlightResolveRef.current.delete(currentUser.uid);
       setAuthError(null);
+      try {
+        await currentUser.getIdToken(true);
+      } catch {}
       await resolveProfileForUser(currentUser);
     } else {
       setAuthStatus('unauthenticated');

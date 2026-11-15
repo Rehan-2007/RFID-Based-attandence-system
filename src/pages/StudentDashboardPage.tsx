@@ -15,7 +15,11 @@ import {
   RotateCcw,
   ShieldAlert,
   AlertTriangle,
-  Ban
+  Ban,
+  Trophy,
+  Flame,
+  Award,
+  ArrowRight
 } from 'lucide-react';
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, PieChart, Pie, Cell } from 'recharts';
 import { useAuth } from '../context/AuthContext';
@@ -47,6 +51,9 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
     attendanceDeadline,
     isAfterDeadline,
     isTodayHoliday,
+    myLeaderboardStats,
+    leaderboardEnabled,
+    leaderboardSnapshots,
   } = useAttendance();
 
   // Dynamically match live synced student profile (no hardcoded fallback)
@@ -536,6 +543,62 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({ onNa
           </div>
         </div>
       </div>
+
+      {/* Attendance Streak & Regularity Highlights */}
+      {myLeaderboardStats && (
+        <div className="p-5 rounded-2xl bg-[#0c1220] border border-slate-800/80 shadow-lg flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div className="flex flex-wrap items-center gap-6">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-orange-500/10 border border-orange-500/25 flex items-center justify-center text-orange-400 shrink-0">
+                <Flame className="w-5 h-5" />
+              </div>
+              <div>
+                <span className="text-[11px] text-slate-400 block">Daily Attendance Streak</span>
+                <span className="text-sm font-bold text-white font-mono tabular-nums">
+                  {myLeaderboardStats.currentStreak}d Current · {myLeaderboardStats.longestStreak}d Best
+                </span>
+              </div>
+            </div>
+
+            {leaderboardEnabled && (
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-center justify-center text-amber-300 shrink-0">
+                  <Trophy className="w-5 h-5" />
+                </div>
+                <div>
+                  <span className="text-[11px] text-slate-400 block">Regularity Ranking</span>
+                  <span className="text-sm font-bold text-amber-300 font-mono tabular-nums">
+                    Rank #{myLeaderboardStats.rank} of {leaderboardSnapshots.overall?.totalEligibleStudents || 1} · Score {myLeaderboardStats.regularityScore.toFixed(1)}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-center text-emerald-400 shrink-0">
+                <Award className="w-5 h-5" />
+              </div>
+              <div>
+                <span className="text-[11px] text-slate-400 block">Achievements Earned</span>
+                <span className="text-xs font-semibold text-slate-200">
+                  {myLeaderboardStats.achievements.length > 0
+                    ? myLeaderboardStats.achievements.map((a) => a.title).join(' · ')
+                    : 'Keep attending to unlock your first badge'}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => onNavigateTab('leaderboard')}
+            className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-white transition flex items-center gap-2 cursor-pointer self-start lg:self-auto whitespace-nowrap shrink-0"
+          >
+            <span>Open Leaderboard</span>
+            <ArrowRight className="w-3.5 h-3.5 text-amber-300" />
+          </button>
+        </div>
+      )}
 
       {/* Visual Analytics Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

@@ -49,7 +49,8 @@ service cloud.firestore {
           (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
            (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentDbId == studentId ||
             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.rfidUID == studentId)) ||
-          (resource.data.email is string &&
+          ((!('authUid' in resource.data) || resource.data.authUid == '') &&
+           resource.data.email is string &&
            request.auth.token.email is string &&
            resource.data.email.lower() == request.auth.token.email.lower())
         )

@@ -46,6 +46,10 @@ export const StudentNavbar: React.FC<StudentNavbarProps> = ({
       title: 'Attendance Calendar', 
       subtitle: 'Interactive monthly visual view of presence and absence' 
     },
+    leaderboard: {
+      title: 'Attendance Leaderboard',
+      subtitle: 'Regularity rankings, consecutive attendance streaks & earned achievements'
+    },
     profile: { 
       title: 'Student Profile & Security', 
       subtitle: 'Personal academic details and Firebase account security' 

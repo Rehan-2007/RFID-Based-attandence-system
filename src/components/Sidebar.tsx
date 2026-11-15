@@ -11,13 +11,14 @@ import {
   ShieldCheck,
   ChevronRight,
   X,
-  AlertOctagon
+  AlertOctagon,
+  Trophy
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useAttendance } from '../context/AttendanceContext';
 import { getISTClockTime } from '../utils/dateUtils';
 
-export type NavPage = 'dashboard' | 'students' | 'attendance' | 'reports' | 'settings' | 'reset';
+export type NavPage = 'dashboard' | 'students' | 'attendance' | 'leaderboard' | 'reports' | 'settings' | 'reset';
 
 interface SidebarProps {
   currentPage: NavPage;
@@ -56,6 +57,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: ClipboardCheck,
       badge: `${presentTodayCount} Today`,
       badgeColor: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
+    },
+    {
+      id: 'leaderboard' as NavPage,
+      label: 'Attendance Leaderboard',
+      icon: Trophy,
+      badge: 'Rankings',
+      badgeColor: 'text-amber-300 bg-amber-500/10 border-amber-500/20',
     },
     {
       id: 'reports' as NavPage,

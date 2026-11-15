@@ -17,7 +17,10 @@ import {
   Stethoscope,
   Link2,
   Wrench,
-  UserCheck
+  UserCheck,
+  Trophy,
+  Eye,
+  EyeOff
 } from 'lucide-react';
 import { 
   getActiveFirebaseConfig, 
@@ -48,12 +51,16 @@ export const SettingsPage: React.FC = () => {
     isAfterDeadline,
     updateAttendanceDeadline,
     retryConnection,
+    leaderboardEnabled,
+    toggleLeaderboardEnabled,
   } = useAttendance();
   const [config, setConfig] = useState(getActiveFirebaseConfig());
   const [isSaved, setIsSaved] = useState(false);
   const [deadlineInput, setDeadlineInput] = useState(attendanceDeadline);
   const [deadlineStatus, setDeadlineStatus] = useState<{ success: boolean; message: string } | null>(null);
   const [isSavingDeadline, setIsSavingDeadline] = useState(false);
+  const [isSavingLeaderboardToggle, setIsSavingLeaderboardToggle] = useState(false);
+  const [leaderboardToggleStatus, setLeaderboardToggleStatus] = useState<{ success: boolean; message: string } | null>(null);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [isTesting, setIsTesting] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
@@ -744,6 +751,60 @@ void loop() {
             {isSavingDeadline ? 'Saving...' : 'Save Cutoff (IST)'}
           </button>
         </form>
+      </div>
+
+      {/* Student Attendance Leaderboard Visibility Control */}
+      <div className="p-6 rounded-2xl bg-[#0c1220]/90 backdrop-blur-xl border border-slate-800/80 shadow-xl flex flex-col lg:flex-row lg:items-center justify-between gap-5">
+        <div className="space-y-1.5 max-w-2xl">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-300">
+              <Trophy className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <span>Student Attendance Leaderboard Visibility</span>
+              </h3>
+              <p className="text-[11px] text-slate-400">
+                Control whether peer regularity rankings are visible inside the Student Portal. Personal streaks and earned badges continue updating regardless.
+              </p>
+            </div>
+          </div>
+          {leaderboardToggleStatus && (
+            <p className={`text-xs font-medium pt-1 ${leaderboardToggleStatus.success ? 'text-emerald-400' : 'text-rose-400'}`}>
+              {leaderboardToggleStatus.message}
+            </p>
+          )}
+        </div>
+
+        <button
+          type="button"
+          disabled={isSavingLeaderboardToggle}
+          onClick={async () => {
+            setIsSavingLeaderboardToggle(true);
+            setLeaderboardToggleStatus(null);
+            const res = await toggleLeaderboardEnabled(!leaderboardEnabled);
+            setLeaderboardToggleStatus(res);
+            setIsSavingLeaderboardToggle(false);
+          }}
+          className={`px-4 py-2.5 rounded-xl border text-xs font-bold transition flex items-center gap-2 cursor-pointer shrink-0 whitespace-nowrap disabled:opacity-50 ${
+            leaderboardEnabled
+              ? 'bg-emerald-600 hover:bg-emerald-500 border-emerald-400/30 text-white shadow-md shadow-emerald-600/20'
+              : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-200'
+          }`}
+        >
+          {leaderboardEnabled ? (
+            <Eye className="w-4 h-4" />
+          ) : (
+            <EyeOff className="w-4 h-4 text-slate-400" />
+          )}
+          <span>
+            {isSavingLeaderboardToggle
+              ? 'Updating...'
+              : leaderboardEnabled
+                ? 'Leaderboard Enabled for Students'
+                : 'Leaderboard Hidden for Students'}
+          </span>
+        </button>
       </div>
 
       {/* Automatic Database Validation & Account Recovery (Admin-Only) */}

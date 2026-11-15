@@ -498,3 +498,67 @@ export interface DatabaseValidationReport {
   issues: DatabaseDiagnosticIssue[];
   unlinkedUserProfiles: UnlinkedUserProfileEntry[];
 }
+
+export type LeaderboardPeriod = 'overall' | 'weekly' | 'monthly' | 'semester';
+
+export type AchievementId =
+  | 'perfect_attendance'
+  | 'streak_7'
+  | 'streak_30'
+  | 'regular_student'
+  | 'attendance_champion';
+
+export interface AchievementBadge {
+  id: AchievementId;
+  title: string;
+  description: string;
+  icon: 'trophy' | 'flame' | 'star' | 'gem';
+  criteriaLabel: string;
+}
+
+export interface LeaderboardEntry {
+  studentDbId: string;
+  rank: number;
+  name: string;
+  studentId: string; // Roll number
+  avatar?: string;
+  department: string;
+  year: string;
+  semester: string;
+  presentDays: number;
+  totalWorkingDays: number;
+  absentDays: number;
+  attendancePercentage: number;
+  currentStreak: number;
+  longestStreak: number;
+  consistencyScore: number;
+  regularityScore: number;
+  achievements: AchievementBadge[];
+  isTodayPresent?: boolean;
+}
+
+export interface LeaderboardSnapshot {
+  period: LeaderboardPeriod;
+  periodLabel: string;
+  startDate: string;
+  endDate: string;
+  updatedAt: number;
+  totalEligibleStudents: number;
+  totalWorkingDays: number;
+  entries: LeaderboardEntry[];
+}
+
+export interface LeaderboardHistoricalSnapshot {
+  snapshotDate: string;
+  updatedAt: number;
+  period: LeaderboardPeriod;
+  totalStudents: number;
+  topEntries: LeaderboardEntry[];
+}
+
+export interface LeaderboardConfig {
+  enabled: boolean;
+  updatedAt?: number;
+  updatedBy?: string;
+}
+

@@ -179,6 +179,7 @@ export interface AuditActivityLog {
   action: 
     | 'EDIT_ATTENDANCE'
     | 'DELETE_ATTENDANCE'
+    | 'DELETE_ATTENDANCE_BY_DATE'
     | 'RESTORE_ATTENDANCE'
     | 'OVERRIDE_ATTENDANCE'
     | 'REMOVE_OVERRIDE'
@@ -188,7 +189,8 @@ export interface AuditActivityLog {
     | 'SUSPEND_STUDENT'
     | 'UNSUSPEND_STUDENT'
     | 'UNDO_OPERATION'
-    | 'DATABASE_MIGRATION';
+    | 'DATABASE_MIGRATION'
+    | 'STUDENT_UPDATE';
   studentRfid?: string;
   studentName?: string;
   studentId?: string;
@@ -252,8 +254,76 @@ export interface MigrationRecordLog {
   message?: string;
 }
 
+export type MigrationRunStatus = 'idle' | 'running' | 'paused' | 'completed' | 'error';
+
+export type MigrationPhase =
+  | 'idle'
+  | 'authenticating'
+  | 'inspecting'
+  | 'backing_up'
+  | 'migrating_batch'
+  | 'verifying_batch'
+  | 'cleaning_legacy'
+  | 'paused'
+  | 'completed'
+  | 'error';
+
+export interface MigrationFailedItem {
+  key: string;
+  date: string;
+  uid: string;
+  targetPath: string;
+  error: string;
+}
+
+export interface MigrationCheckpoint {
+  version: string;
+  status: MigrationRunStatus;
+  backupPath?: string;
+  backupVerifiedCount?: number;
+  backupExpectedCount?: number;
+  totalLegacyCount: number;
+  processedCount: number;
+  migratedCount: number;
+  skippedCount: number;
+  unregisteredCount: number;
+  verifiedCount: number;
+  failedCount: number;
+  currentBatch: number;
+  totalBatches: number;
+  batchSize: number;
+  completedKeys: Record<string, string>;
+  failedItems: MigrationFailedItem[];
+  startedAt?: number;
+  lastCheckpointAt?: number;
+  completedAt?: number;
+}
+
+export interface MigrationProgress {
+  status: MigrationRunStatus;
+  phase: MigrationPhase;
+  totalLegacy: number;
+  alreadyMigrated: number;
+  pending: number;
+  succeeded: number;
+  failed: number;
+  unregistered: number;
+  currentBatch: number;
+  totalBatches: number;
+  batchSize: number;
+  progressPercent: number;
+  recordsPerSec: number;
+  durationMs: number;
+  lastCheckpointAt?: number;
+  verificationStatus: 'pending' | 'verifying' | 'verified' | 'partial' | 'failed';
+  backupPath?: string;
+  message?: string;
+  logs: MigrationRecordLog[];
+}
+
 export interface MigrationResult {
   success: boolean;
+  paused?: boolean;
   message: string;
   adminUid?: string;
   backupPath?: string;
@@ -261,10 +331,15 @@ export interface MigrationResult {
   backupExpectedCount?: number;
   migratedCount: number;
   skippedDuplicateCount: number;
+  alreadyMigratedCount?: number;
   unregisteredCount: number;
   verifiedCount: number;
+  failedCount?: number;
   totalLegacyCount: number;
   legacyRemoved: boolean;
+  durationMs?: number;
+  recordsPerSec?: number;
+  lastCheckpointAt?: number;
   failedOperation?: string;
   failedPath?: string;
   errors: string[];
@@ -272,10 +347,24 @@ export interface MigrationResult {
 }
 
 export interface AutoMigrationStatus {
-  status: 'idle' | 'migrating' | 'success' | 'error';
+  status: 'idle' | 'migrating' | 'paused' | 'success' | 'error';
   message?: string;
   result?: MigrationResult;
+  progress?: MigrationProgress;
   updatedAt?: number;
+}
+
+export interface DashboardAggregates {
+  updatedAt: number;
+  todayStr: string;
+  totalActiveStudents: number;
+  presentToday: number;
+  explicitAbsentToday: number;
+  pendingToday: number;
+  absentToday: number;
+  attendanceRate: number;
+  totalHistoricalRecords: number;
+  verifiedWorkingDays: number;
 }
 
 export interface AttendanceSettings {

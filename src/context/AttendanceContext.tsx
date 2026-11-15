@@ -15,6 +15,9 @@ import {
   WorkingDayConfig,
   MigrationInspection,
   MigrationResult,
+  MigrationProgress,
+  MigrationCheckpoint,
+  DashboardAggregates,
   AutoMigrationStatus,
   UnregisteredAttendanceGroup,
   DbDiagnosticState,
@@ -43,10 +46,12 @@ import {
   getFirebaseDatabase,
   subscribeToAuditLogs,
   subscribeToTrashRecords,
+  subscribeToUnknownScans,
   subscribeToSuspensions,
   subscribeToStudentSuspensions,
   updateAttendanceRecord,
   deleteAttendanceRecord,
+  deleteAttendanceByDate as fbDeleteAttendanceByDate,
   bulkDeleteAttendance,
   bulkUpdateAttendanceStatus,
   restoreDeletedAttendance,
@@ -61,6 +66,13 @@ import {
   subscribeToLegacyAttendanceChanges,
   exportCompleteDatabaseBackup,
   runUnifiedDatabaseMigration,
+  pauseDatabaseMigration,
+  isMigrationPausedRequested,
+  getMigrationCheckpoint,
+  retryFailedMigrationRecords,
+  computeDashboardAggregates,
+  rebuildAndVerifyAggregates,
+  dedupeInFlight,
   subscribeToMigrationRecovery,
   assignRecoveredAttendanceToStudent,
   deleteRecoveredAttendance,
@@ -76,6 +88,7 @@ import {
   getPastISTDates,
   isAfterISTDeadline,
   isValidDeadlineHHMM,
+  normalizeToISODate,
 } from '../utils/dateUtils';
 
 interface LiveScanEvent {
@@ -133,12 +146,19 @@ interface AttendanceContextType {
 
   // Migration & Holiday Calendar Controls
   migrationInspection: MigrationInspection | null;
+  migrationProgress: MigrationProgress | null;
+  migrationCheckpoint: MigrationCheckpoint | null;
+  dashboardAggregates: DashboardAggregates;
   autoMigrationStatus: AutoMigrationStatus;
   dismissAutoMigrationStatus: () => void;
   unregisteredRecovery: UnregisteredAttendanceGroup[];
   toggleHolidayDate: (date: string, isHoliday: boolean, label?: string) => Promise<void>;
   refreshMigrationInspection: () => Promise<MigrationInspection | null>;
-  executeDatabaseMigration: () => Promise<MigrationResult>;
+  executeDatabaseMigration: (options?: { batchSize?: number; resume?: boolean }) => Promise<MigrationResult>;
+  pauseMigration: () => void;
+  resumeMigration: (batchSize?: number) => Promise<MigrationResult>;
+  retryFailedMigration: (batchSize?: number) => Promise<MigrationResult>;
+  rebuildVerifiedAggregates: () => Promise<DashboardAggregates>;
   downloadDatabaseBackup: () => Promise<{
     backupPath: string;
     filename: string;
@@ -163,6 +183,10 @@ interface AttendanceContextType {
     uid: string,
     reason: string
   ) => Promise<{ success: boolean; message: string }>;
+  deleteAttendanceByDate: (
+    date: string,
+    reason?: string
+  ) => Promise<{ success: boolean; date: string; deletedCount: number; message: string }>;
   bulkDeleteAttendanceRecords: (
     records: Array<{ date: string; uid: string; studentName?: string }>,
     reason: string
@@ -234,12 +258,20 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
 
   // Migration & Recovery states
   const [migrationInspection, setMigrationInspection] = useState<MigrationInspection | null>(null);
+  const [migrationProgress, setMigrationProgress] = useState<MigrationProgress | null>(null);
+  const [migrationCheckpoint, setMigrationCheckpoint] = useState<MigrationCheckpoint | null>(null);
   const [autoMigrationStatus, setAutoMigrationStatus] = useState<AutoMigrationStatus>({ status: 'idle' });
   const [unregisteredRecovery, setUnregisteredRecovery] = useState<UnregisteredAttendanceGroup[]>([]);
 
   const autoMigrationInFlightRef = React.useRef<boolean>(false);
   const lastAutoMigrationSigRef = React.useRef<string>('');
   const authLinksSyncedRef = React.useRef<boolean>(false);
+  const migrationProgressRef = React.useRef<MigrationProgress | null>(null);
+  const syncedDatesSetRef = React.useRef<Set<string>>(new Set());
+  // Incremental WeakMap cache: only newly changed Student objects re-run normalizeAttendanceRecord
+  const normalizedAttendanceCacheRef = React.useRef<WeakMap<Student, Record<string, AttendanceRecord>>>(
+    new WeakMap()
+  );
 
   const dismissAutoMigrationStatus = useCallback(() => {
     setAutoMigrationStatus({ status: 'idle' });
@@ -288,10 +320,12 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     };
   }, []);
 
-  // Derive allAttendance & todayAttendance dynamically from unified students/{studentDbId}/attendance/{DATE}
+  // Derive allAttendance & todayAttendance incrementally from unified students/{studentDbId}/attendance/{DATE}
+  // Using a WeakMap keyed by Student reference guarantees O(1) reuse for all unaffected students on live scans.
   const { allAttendance, todayAttendance } = useMemo(() => {
     const allMap: Record<string, Record<string, AttendanceRecord>> = {};
     const todayMap: Record<string, AttendanceRecord> = {};
+    const cache = normalizedAttendanceCacheRef.current;
 
     // Ensure non-holiday working_days entries exist in allMap keys for consistent working day counts
     Object.entries(workingDays || {}).forEach(([dateKey, cfg]) => {
@@ -303,27 +337,33 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     Object.entries(students || {}).forEach(([dbKey, st]) => {
       if (!st || !st.attendance) return;
       const studentDbId = (st.studentDbId || dbKey).trim();
-      const cardUid = (st.rfidUID || st.uid || dbKey).trim().toUpperCase();
 
-      Object.entries(st.attendance).forEach(([dateKey, rawRec]) => {
-        if (!rawRec || rawRec.isDeleted) return;
-        const rec = normalizeAttendanceRecord(
-          {
-            ...rawRec,
-            studentDbId,
-            studentName: rawRec.studentName || st.name,
-            studentId: rawRec.studentId || st.studentId,
-            department: rawRec.department || st.department,
-            authUid: rawRec.authUid || st.authUid,
-          },
-          dateKey,
-          cardUid,
-          studentDbId
-        );
+      let perDateNorm = cache.get(st);
+      if (!perDateNorm) {
+        perDateNorm = {};
+        const cardUid = (st.rfidUID || st.uid || dbKey).trim().toUpperCase();
+        Object.entries(st.attendance).forEach(([dateKey, rawRec]) => {
+          if (!rawRec || rawRec.isDeleted) return;
+          perDateNorm![dateKey] = normalizeAttendanceRecord(
+            {
+              ...rawRec,
+              studentDbId,
+              studentName: rawRec.studentName || st.name,
+              studentId: rawRec.studentId || st.studentId,
+              department: rawRec.department || st.department,
+              authUid: rawRec.authUid || st.authUid,
+            },
+            dateKey,
+            cardUid,
+            studentDbId
+          );
+        });
+        cache.set(st, perDateNorm);
+      }
 
+      Object.entries(perDateNorm).forEach(([dateKey, rec]) => {
         if (!allMap[dateKey]) allMap[dateKey] = {};
         allMap[dateKey][studentDbId] = rec;
-
         if (dateKey === todayStr) {
           todayMap[studentDbId] = rec;
         }
@@ -343,6 +383,8 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       setAuditLogs([]);
       setSuspensions({});
       setMigrationInspection(null);
+      setMigrationProgress(null);
+      setMigrationCheckpoint(null);
       setAutoMigrationStatus({ status: 'idle' });
       setUnregisteredRecovery([]);
       setIsLoading(false);
@@ -351,6 +393,8 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       dbErrorRef.current = null;
       lastAutoMigrationSigRef.current = '';
       authLinksSyncedRef.current = false;
+      syncedDatesSetRef.current.clear();
+      migrationProgressRef.current = null;
       setDbErrorMessage(null);
       setDbDiagnostic({
         code: 'connecting',
@@ -376,70 +420,47 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         setIsDbConnected(!dbErrorRef.current);
         if (wasDisconnectedRef.current) {
           wasDisconnectedRef.current = false;
-          lastAutoMigrationSigRef.current = '';
-          fetchDirectAttendance({
-            role: user.role,
-            uid: user.uid,
-            studentDbId: user.studentDbId,
-            studentId: user.studentId || user.rollNumber,
-            rollNumber: user.studentId || user.rollNumber,
-            rfidUID: user.rfidUID,
-            email: user.email,
-            displayName: user.displayName,
-          })
-            .then(async (res) => {
-              if (!isMounted) return;
-              if (res.workingDays) setWorkingDays(res.workingDays);
-              if (user.role === 'student' && res.studentNode) {
-                const dbKey = (res.studentNode.studentDbId || user.studentDbId || res.studentNode.uid || '').trim();
-                if (dbKey) {
-                  setStudents({
-                    [dbKey]: { ...res.studentNode, studentDbId: dbKey },
-                  });
-                }
-                const attCount = Object.values(res.studentNode.attendance || {}).filter((r) => r && !r.isDeleted).length;
-                setDbDiagnostic(
-                  attCount === 0
-                    ? {
-                        code: 'empty_records',
-                        label: 'SYNCED',
-                        message: 'Connected to Firebase. Attendance records are currently empty for this student.',
-                      }
-                    : {
-                        code: 'connected',
-                        label: 'SYNCED',
-                        message: 'Real-time synchronization active.',
-                      }
-                );
-              } else if (user.role === 'admin') {
-                try {
-                  const db = getFirebaseDatabase();
-                  const snap = await get(ref(db, 'students'));
-                  if (isMounted && snap.exists()) {
-                    const val = snap.val() as Record<string, Student>;
-                    const normalizedMap: Record<string, Student> = {};
-                    Object.entries(val).forEach(([k, st]) => {
-                      if (!st) return;
-                      const rfid = (st.rfidUID || st.uid || k).trim().toUpperCase();
-                      normalizedMap[k] = { ...st, studentDbId: k, rfidUID: rfid, uid: rfid };
+          // Active child/value listeners auto-sync on RTDB reconnect; only do full fallback fetch if needed
+          if (dbErrorRef.current) {
+            dedupeInFlight(`reconnect_resync_${user.uid}`, () =>
+              fetchDirectAttendance({
+                role: user.role,
+                uid: user.uid,
+                studentDbId: user.studentDbId,
+                studentId: user.studentId || user.rollNumber,
+                rollNumber: user.studentId || user.rollNumber,
+                rfidUID: user.rfidUID,
+                email: user.email,
+                displayName: user.displayName,
+              })
+            )
+              .then((res) => {
+                if (!isMounted) return;
+                if (res.workingDays) setWorkingDays(res.workingDays);
+                if (user.role === 'student' && res.studentNode) {
+                  const dbKey = (res.studentNode.studentDbId || user.studentDbId || res.studentNode.uid || '').trim();
+                  if (dbKey) {
+                    setStudents({
+                      [dbKey]: { ...res.studentNode, studentDbId: dbKey },
                     });
-                    setStudents(normalizedMap);
                   }
-                } catch {}
-              }
-              dbErrorRef.current = null;
-              setDbErrorMessage(null);
-              setIsDbConnected(true);
-              setLastSyncedAt(Date.now());
-            })
-            .catch((err) => {
-              if (!isMounted) return;
-              const diag = classifyFirebaseError(err);
-              dbErrorRef.current = diag.message;
-              setDbErrorMessage(diag.message);
-              setDbDiagnostic(diag);
-              setIsDbConnected(false);
-            });
+                }
+                dbErrorRef.current = null;
+                setDbErrorMessage(null);
+                setIsDbConnected(true);
+                setLastSyncedAt(Date.now());
+              })
+              .catch((err) => {
+                if (!isMounted) return;
+                const diag = classifyFirebaseError(err);
+                dbErrorRef.current = diag.message;
+                setDbErrorMessage(diag.message);
+                setDbDiagnostic(diag);
+                setIsDbConnected(false);
+              });
+          } else {
+            setLastSyncedAt(Date.now());
+          }
         }
       } else {
         wasDisconnectedRef.current = true;
@@ -488,51 +509,60 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       unsubs.push(subscribeToSuspensions((suspMap) => setSuspensions(suspMap)));
       unsubs.push(subscribeToMigrationRecovery((groups) => setUnregisteredRecovery(groups)));
 
-      // Unknown scans listener
-      try {
-        const db = getFirebaseDatabase();
-        const unknownRef = ref(db, 'unknown_scans');
-        const unsubUnknown = onValue(
-          unknownRef,
-          (snap) => {
-            if (!snap.exists()) {
-              setUnknownScans([]);
-              return;
-            }
-            const val = snap.val() as Record<string, AttendanceRecord>;
-            const list = Object.values(val).sort((a, b) => b.timestamp - a.timestamp);
-            setUnknownScans(list);
-          },
-          () => {}
-        );
-        unsubs.push(() => off(unknownRef, 'value', unsubUnknown));
-      } catch {}
+      // Bounded & indexed unknown scans listener (top 100 latest)
+      unsubs.push(
+        subscribeToUnknownScans((list) => {
+          if (isMounted) setUnknownScans(list);
+        })
+      );
 
       checkAndReactivateExpiredSuspensions().catch(() => {});
 
-      // Inspect legacy & backup state on initialization
-      inspectLegacyDatabase()
-        .then((insp) => {
-          if (isMounted) setMigrationInspection(insp);
-        })
-        .catch(() => {});
+      // Inspect legacy, backup & checkpoint state on initialization
+      Promise.all([inspectLegacyDatabase().catch(() => null), getMigrationCheckpoint().catch(() => null)]).then(
+        ([insp, cp]) => {
+          if (!isMounted) return;
+          if (insp) setMigrationInspection(insp);
+          setMigrationCheckpoint(cp);
+          if (cp && cp.status === 'paused') {
+            setAutoMigrationStatus({
+              status: 'paused',
+              message: `Migration paused at checkpoint (${cp.migratedCount + cp.skippedCount}/${cp.totalLegacyCount} processed). Resume anytime.`,
+              updatedAt: Date.now(),
+            });
+          }
+        }
+      );
 
-      // Real-time automatic legacy /attendance listener -> auto-backups, migrates, verifies, & cleans up
+      // Real-time automatic legacy /attendance listener -> auto-backups, migrates in batches, verifies, & cleans up
       unsubs.push(
         subscribeToLegacyAttendanceChanges(
           async (info) => {
             if (!isMounted) return;
             if (!info.hasLegacy || info.recordCount === 0) {
               lastAutoMigrationSigRef.current = '';
-              inspectLegacyDatabase()
-                .then((insp) => {
-                  if (isMounted) setMigrationInspection(insp);
-                })
-                .catch(() => {});
+              if (!autoMigrationInFlightRef.current) {
+                inspectLegacyDatabase()
+                  .then((insp) => {
+                    if (isMounted) setMigrationInspection(insp);
+                  })
+                  .catch(() => {});
+              }
               return;
             }
 
-            if (autoMigrationInFlightRef.current || lastAutoMigrationSigRef.current === info.signature) {
+            if (
+              autoMigrationInFlightRef.current ||
+              lastAutoMigrationSigRef.current === info.signature ||
+              isMigrationPausedRequested()
+            ) {
+              return;
+            }
+
+            const existingCheckpoint = await getMigrationCheckpoint().catch(() => null);
+            if (!isMounted) return;
+            if (existingCheckpoint) setMigrationCheckpoint(existingCheckpoint);
+            if (existingCheckpoint?.status === 'paused') {
               return;
             }
 
@@ -540,28 +570,48 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
             lastAutoMigrationSigRef.current = info.signature;
             setAutoMigrationStatus({
               status: 'migrating',
-              message: `Detected ${info.recordCount} legacy attendance record${info.recordCount === 1 ? '' : 's'} at /attendance. Backing up to /backups and migrating automatically...`,
+              message: `Detected ${info.recordCount} legacy attendance record${info.recordCount === 1 ? '' : 's'} at /attendance. Backing up and migrating in high-speed batches...`,
               updatedAt: Date.now(),
             });
 
             try {
-              const res = await runUnifiedDatabaseMigration({ email: user.email, uid: user.uid });
+              const res = await runUnifiedDatabaseMigration(
+                { email: user.email, uid: user.uid },
+                {
+                  resume: true,
+                  onProgress: (progress) => {
+                    if (!isMounted) return;
+                    migrationProgressRef.current = progress;
+                    setMigrationProgress(progress);
+                    setAutoMigrationStatus({
+                      status:
+                        progress.status === 'paused'
+                          ? 'paused'
+                          : progress.status === 'error'
+                            ? 'error'
+                            : progress.status === 'completed'
+                              ? 'success'
+                              : 'migrating',
+                      message: progress.message,
+                      progress,
+                      updatedAt: Date.now(),
+                    });
+                  },
+                }
+              );
               if (!isMounted) return;
-              const insp = await inspectLegacyDatabase().catch(() => null);
-              if (isMounted && insp) setMigrationInspection(insp);
-
-              if (res.success) {
+              const [insp, cp] = await Promise.all([
+                inspectLegacyDatabase().catch(() => null),
+                getMigrationCheckpoint().catch(() => null),
+              ]);
+              if (isMounted) {
+                if (insp) setMigrationInspection(insp);
+                setMigrationCheckpoint(cp);
                 setAutoMigrationStatus({
-                  status: 'success',
+                  status: res.paused ? 'paused' : res.success ? 'success' : 'error',
                   message: res.message,
                   result: res,
-                  updatedAt: Date.now(),
-                });
-              } else {
-                setAutoMigrationStatus({
-                  status: 'error',
-                  message: res.message,
-                  result: res,
+                  progress: migrationProgressRef.current || undefined,
                   updatedAt: Date.now(),
                 });
               }
@@ -582,47 +632,55 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         )
       );
 
-      // Single unified Admin listener on /students (contains profile + nested attendance)
+      // Incremental unified Admin listener on /students (preserves object identity of untouched students)
       unsubs.push(
         subscribeToStudents(
-          (data) => {
+          (data, delta) => {
             if (!isMounted) return;
             dbErrorRef.current = null;
             setDbErrorMessage(null);
             setIsDbConnected(true);
             setLastSyncedAt(Date.now());
 
-            if (data && Object.keys(data).length > 0) {
-              const normalizedMap: Record<string, Student> = {};
-              const discoveredDates = new Set<string>();
-              Object.entries(data).forEach(([dbKey, st]) => {
-                if (!st) return;
-                const cardRfid = (st.rfidUID || st.uid || dbKey).trim().toUpperCase();
-                normalizedMap[dbKey] = {
-                  ...st,
-                  studentDbId: dbKey,
-                  rfidUID: cardRfid,
-                  uid: cardRfid,
-                };
-                if (st.attendance) {
-                  Object.keys(st.attendance).forEach((d) => discoveredDates.add(d));
-                }
-              });
-              setStudents(normalizedMap);
+            const hasStudents = Boolean(data && Object.keys(data).length > 0);
+            setStudents(hasStudents ? data : {});
+
+            if (hasStudents) {
               setDbDiagnostic({
                 code: 'connected',
                 label: 'SYNCED',
                 message: 'Live real-time sync active across student directory and attendance.',
               });
+
               if (!authLinksSyncedRef.current) {
                 authLinksSyncedRef.current = true;
-                reconcileAllStudentMappings(normalizedMap).catch(() => {});
+                reconcileAllStudentMappings(data).catch(() => {});
               }
-              if (discoveredDates.size > 0) {
-                syncWorkingDaysFromDates(Array.from(discoveredDates)).catch(() => {});
+
+              // Sync only newly discovered dates instead of re-scanning all students on every single scan
+              const newlyDiscoveredDates: string[] = [];
+              if (delta && (delta.type === 'added' || delta.type === 'changed') && delta.student?.attendance) {
+                Object.keys(delta.student.attendance).forEach((d) => {
+                  if (!syncedDatesSetRef.current.has(d)) {
+                    syncedDatesSetRef.current.add(d);
+                    newlyDiscoveredDates.push(d);
+                  }
+                });
+              } else if (!delta || delta.type === 'initial') {
+                Object.values(data).forEach((st) => {
+                  if (!st?.attendance) return;
+                  Object.keys(st.attendance).forEach((d) => {
+                    if (!syncedDatesSetRef.current.has(d)) {
+                      syncedDatesSetRef.current.add(d);
+                      newlyDiscoveredDates.push(d);
+                    }
+                  });
+                });
+              }
+              if (newlyDiscoveredDates.length > 0) {
+                syncWorkingDaysFromDates(newlyDiscoveredDates).catch(() => {});
               }
             } else {
-              setStudents({});
               setDbDiagnostic({
                 code: 'empty_records',
                 label: 'SYNCED',
@@ -768,8 +826,10 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
             if (!isMounted) return;
             const mapVal = mapSnap.exists() ? mapSnap.val() : null;
             const userVal = userSnap.exists() ? userSnap.val() : null;
-            const foundDbId = (mapVal?.studentDbId || userVal?.studentDbId || mapVal?.rfidUID || userVal?.rfidUID || '').trim();
-            const foundRfid = (mapVal?.rfidUID || userVal?.rfidUID || foundDbId).trim().toUpperCase();
+            const mapDbId = typeof mapVal === 'string' ? mapVal : mapVal?.studentDbId;
+            const mapRfid = typeof mapVal === 'string' ? '' : mapVal?.rfidUID;
+            const foundDbId = (mapDbId || userVal?.studentDbId || mapRfid || userVal?.rfidUID || '').trim();
+            const foundRfid = (mapRfid || userVal?.rfidUID || foundDbId).trim().toUpperCase();
 
             if (foundDbId) {
               attachStudentListeners(foundDbId, foundRfid);
@@ -876,42 +936,21 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     return isAfterISTDeadline(attendanceDeadline, clockTick);
   }, [attendanceDeadline, clockTick]);
 
-  const { presentTodayCount, explicitAbsentTodayCount } = useMemo(() => {
-    let present = 0;
-    let explicitAbsent = 0;
+  const dashboardAggregates = useMemo(
+    () =>
+      computeDashboardAggregates({
+        studentsMap: students,
+        workingDays,
+        todayStr,
+        isAfterDeadline,
+      }),
+    [students, workingDays, todayStr, isAfterDeadline]
+  );
 
-    for (const key of Object.keys(todayAttendance)) {
-      const cleanKey = key.trim();
-      const rec = todayAttendance[key];
-      if (!rec || rec.isDeleted || (!activeDbIdSet.has(cleanKey) && !activeDbIdSet.has(cleanKey.toUpperCase()))) continue;
-
-      if (rec.status === 'Present') {
-        present++;
-      } else if (rec.status === 'Absent') {
-        explicitAbsent++;
-      }
-    }
-
-    return { presentTodayCount: present, explicitAbsentTodayCount: explicitAbsent };
-  }, [todayAttendance, activeDbIdSet]);
-
-  const unscannedActiveCount = Math.max(0, totalStudentsCount - presentTodayCount - explicitAbsentTodayCount);
-
-  // Never classify pending students as absent before the configured attendance deadline
-  const pendingTodayCount = useMemo(() => {
-    if (isTodayHoliday || isAfterDeadline) return 0;
-    return unscannedActiveCount;
-  }, [isTodayHoliday, isAfterDeadline, unscannedActiveCount]);
-
-  const absentTodayCount = useMemo(() => {
-    if (isTodayHoliday) return explicitAbsentTodayCount;
-    return isAfterDeadline ? explicitAbsentTodayCount + unscannedActiveCount : explicitAbsentTodayCount;
-  }, [isTodayHoliday, isAfterDeadline, explicitAbsentTodayCount, unscannedActiveCount]);
-
-  const todayPercentage = useMemo(() => {
-    if (totalStudentsCount === 0) return 0;
-    return Math.round((presentTodayCount / totalStudentsCount) * 100);
-  }, [presentTodayCount, totalStudentsCount]);
+  const presentTodayCount = dashboardAggregates.presentToday;
+  const pendingTodayCount = dashboardAggregates.pendingToday;
+  const absentTodayCount = dashboardAggregates.absentToday;
+  const todayPercentage = dashboardAggregates.attendanceRate;
 
   // Weekly Stats (last 7 IST days, respecting holidays & today's pending window)
   const weeklyStats: DayStats[] = useMemo(() => {
@@ -1235,19 +1274,145 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
 
   const refreshMigrationInspection = useCallback(async (): Promise<MigrationInspection | null> => {
     try {
-      const insp = await inspectLegacyDatabase();
+      const [insp, cp] = await Promise.all([
+        inspectLegacyDatabase(),
+        getMigrationCheckpoint().catch(() => null),
+      ]);
       setMigrationInspection(insp);
+      setMigrationCheckpoint(cp);
       return insp;
     } catch {
       return null;
     }
   }, []);
 
-  const executeDatabaseMigration = useCallback(async (): Promise<MigrationResult> => {
-    const res = await runUnifiedDatabaseMigration({ email: user?.email, uid: user?.uid });
-    await refreshMigrationInspection();
-    return res;
-  }, [user, refreshMigrationInspection]);
+  const executeDatabaseMigration = useCallback(
+    async (options?: { batchSize?: number; resume?: boolean }): Promise<MigrationResult> => {
+      autoMigrationInFlightRef.current = true;
+      try {
+        const res = await runUnifiedDatabaseMigration(
+          { email: user?.email, uid: user?.uid },
+          {
+            batchSize: options?.batchSize,
+            resume: options?.resume,
+            onProgress: (progress) => {
+              migrationProgressRef.current = progress;
+              setMigrationProgress(progress);
+              setAutoMigrationStatus({
+                status:
+                  progress.status === 'paused'
+                    ? 'paused'
+                    : progress.status === 'error'
+                      ? 'error'
+                      : progress.status === 'completed'
+                        ? 'success'
+                        : 'migrating',
+                message: progress.message,
+                progress,
+                updatedAt: Date.now(),
+              });
+            },
+          }
+        );
+        const [insp, cp] = await Promise.all([
+          inspectLegacyDatabase().catch(() => null),
+          getMigrationCheckpoint().catch(() => null),
+        ]);
+        if (insp) setMigrationInspection(insp);
+        setMigrationCheckpoint(cp);
+        setAutoMigrationStatus({
+          status: res.paused ? 'paused' : res.success ? 'success' : 'error',
+          message: res.message,
+          result: res,
+          progress: migrationProgressRef.current || undefined,
+          updatedAt: Date.now(),
+        });
+        return res;
+      } finally {
+        autoMigrationInFlightRef.current = false;
+      }
+    },
+    [user]
+  );
+
+  const pauseMigration = useCallback(() => {
+    pauseDatabaseMigration();
+    setMigrationProgress((prev) =>
+      prev
+        ? {
+            ...prev,
+            status: 'paused',
+            phase: 'paused',
+            message: 'Pause requested — committing current batch & checkpoint safely...',
+          }
+        : prev
+    );
+    setAutoMigrationStatus((prev) => ({
+      ...prev,
+      status: 'paused',
+      message: 'Pause requested — saving current batch checkpoint...',
+      updatedAt: Date.now(),
+    }));
+  }, []);
+
+  const resumeMigration = useCallback(
+    async (batchSize?: number): Promise<MigrationResult> => {
+      return executeDatabaseMigration({ batchSize, resume: true });
+    },
+    [executeDatabaseMigration]
+  );
+
+  const retryFailedMigration = useCallback(
+    async (batchSize?: number): Promise<MigrationResult> => {
+      autoMigrationInFlightRef.current = true;
+      try {
+        const res = await retryFailedMigrationRecords(
+          { email: user?.email, uid: user?.uid },
+          {
+            batchSize,
+            onProgress: (progress) => {
+              migrationProgressRef.current = progress;
+              setMigrationProgress(progress);
+              setAutoMigrationStatus({
+                status:
+                  progress.status === 'paused'
+                    ? 'paused'
+                    : progress.status === 'error'
+                      ? 'error'
+                      : progress.status === 'completed'
+                        ? 'success'
+                        : 'migrating',
+                message: progress.message,
+                progress,
+                updatedAt: Date.now(),
+              });
+            },
+          }
+        );
+        const [insp, cp] = await Promise.all([
+          inspectLegacyDatabase().catch(() => null),
+          getMigrationCheckpoint().catch(() => null),
+        ]);
+        if (insp) setMigrationInspection(insp);
+        setMigrationCheckpoint(cp);
+        setAutoMigrationStatus({
+          status: res.paused ? 'paused' : res.success ? 'success' : 'error',
+          message: res.message,
+          result: res,
+          progress: migrationProgressRef.current || undefined,
+          updatedAt: Date.now(),
+        });
+        return res;
+      } finally {
+        autoMigrationInFlightRef.current = false;
+      }
+    },
+    [user]
+  );
+
+  const rebuildVerifiedAggregates = useCallback(async () => {
+    return rebuildAndVerifyAggregates(students, workingDays, todayStr, isAfterDeadline);
+  }, [students, workingDays, todayStr, isAfterDeadline]);
 
   const downloadDatabaseBackup = useCallback(async () => {
     const backup = await exportCompleteDatabaseBackup({ email: user?.email, uid: user?.uid });
@@ -1393,6 +1558,91 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       }
     },
     [user, registerUndo]
+  );
+
+  const deleteAttendanceByDate = useCallback(
+    async (
+      date: string,
+      reason?: string
+    ): Promise<{ success: boolean; date: string; deletedCount: number; message: string }> => {
+      const normalized = normalizeToISODate(date) || date;
+      if (!user || user.role !== 'admin') {
+        return {
+          success: false,
+          date: normalized,
+          deletedCount: 0,
+          message: 'Unauthorized: Only administrators can delete attendance by date.',
+        };
+      }
+      try {
+        const res = await fbDeleteAttendanceByDate(
+          normalized,
+          { email: user.email, uid: user.uid },
+          reason
+        );
+
+        // Immediately synchronize in-memory students, workingDays, and trash state
+        setStudents((prev) => {
+          const next: Record<string, Student> = {};
+          Object.entries(prev).forEach(([dbKey, st]) => {
+            if (!st) return;
+            if (!st.attendance) {
+              next[dbKey] = st;
+              return;
+            }
+            const filteredAtt: Record<string, AttendanceRecord> = {};
+            Object.entries(st.attendance).forEach(([attKey, rec]) => {
+              const keyDate = normalizeToISODate(attKey);
+              const recDate = normalizeToISODate(rec?.date);
+              if (attKey !== res.date && keyDate !== res.date && recDate !== res.date) {
+                filteredAtt[attKey] = rec;
+              }
+            });
+            next[dbKey] = { ...st, attendance: filteredAtt };
+          });
+          return next;
+        });
+
+        setWorkingDays((prev) => {
+          if (!prev[res.date] || prev[res.date]?.isHoliday) return prev;
+          const next = { ...prev };
+          delete next[res.date];
+          return next;
+        });
+
+        setTrashRecords((prev) =>
+          prev.filter(
+            (t) =>
+              normalizeToISODate(t.date) !== res.date &&
+              !t.trashId.startsWith(`${res.date}_`)
+          )
+        );
+
+        setActiveUndo((prev) => {
+          if (!prev) return null;
+          const revertDate = prev.revertData?.deletedRecord?.date || prev.revertData?.prevRecord?.date;
+          if (revertDate && normalizeToISODate(revertDate) === res.date) return null;
+          return prev;
+        });
+
+        setLastSyncedAt(Date.now());
+
+        return {
+          success: true,
+          date: res.date,
+          deletedCount: res.deletedCount,
+          message: `Permanently deleted ${res.deletedCount} attendance record${res.deletedCount === 1 ? '' : 's'} for ${res.date}.`,
+        };
+      } catch (err: any) {
+        return {
+          success: false,
+          date: normalized,
+          deletedCount: 0,
+          message: err?.message || `Failed to delete attendance records for ${normalized}.`,
+        };
+      }
+    },
+    [user]
   );
 
   const bulkDeleteAttendanceRecords = useCallback(
@@ -1695,17 +1945,25 @@ export const AttendanceProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         triggerUndo,
         dismissUndo,
         migrationInspection,
+        migrationProgress,
+        migrationCheckpoint,
+        dashboardAggregates,
         autoMigrationStatus,
         dismissAutoMigrationStatus,
         unregisteredRecovery,
         toggleHolidayDate,
         refreshMigrationInspection,
         executeDatabaseMigration,
+        pauseMigration,
+        resumeMigration,
+        retryFailedMigration,
+        rebuildVerifiedAggregates,
         downloadDatabaseBackup,
         assignRecoveredRecords,
         dismissRecoveredRecords,
         editAttendance,
         deleteAttendance,
+        deleteAttendanceByDate,
         bulkDeleteAttendanceRecords,
         bulkUpdateStatus,
         restoreTrashRecord,

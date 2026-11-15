@@ -161,7 +161,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         lastResolveErrorRef.current = notRegisteredMsg;
         return null;
       } catch (err: any) {
-        console.error('Error in profile resolution:', err);
+        console.warn('Profile resolution diagnostic notice:', err?.message || err);
         const diag = classifyFirebaseError(err);
         const errPath = err?.path || diag.path || `/users/${fbUser.uid}`;
         setUser(null);
@@ -349,7 +349,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       await sendPasswordReset(email);
       return { success: true };
     } catch (err: any) {
-      console.error('Password reset email error:', err);
+      console.warn('Password reset email notice:', err?.code || err?.message);
       let msg = 'Failed to send password reset email.';
       if (err.code === 'auth/user-not-found') {
         msg = 'No registered account found with this email address.';
@@ -367,7 +367,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       await updateUserPassword(newPass);
       return { success: true };
     } catch (err: any) {
-      console.error('Password update error:', err);
+      console.warn('Password update notice:', err?.code || err?.message);
       let msg = 'Failed to update password. Please check security requirements.';
       if (err.code === 'auth/weak-password') {
         msg = 'Password is too weak. Please use at least 6 characters.';

@@ -19,6 +19,8 @@ import {
   RefreshCw,
   Layers,
   CheckCircle2,
+  Pause,
+  Play,
   X
 } from 'lucide-react';
 import { 
@@ -91,7 +93,10 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate, onOpen
     dbErrorMessage,
     retryConnection,
     migrationInspection,
+    migrationProgress,
     autoMigrationStatus,
+    pauseMigration,
+    resumeMigration,
     dismissAutoMigrationStatus,
     unregisteredRecovery
   } = useAttendance();
@@ -234,11 +239,74 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate, onOpen
 
       {/* Live Automatic Database Migration Notifications */}
       {autoMigrationStatus.status === 'migrating' && (
-        <div className="p-4 rounded-2xl bg-gradient-to-r from-cyan-950/60 via-slate-900 to-blue-950/50 border border-cyan-500/40 text-xs flex items-center gap-3 shadow-lg">
-          <RefreshCw className="w-4 h-4 text-cyan-400 animate-spin shrink-0" />
-          <div className="flex-1">
-            <p className="font-bold text-cyan-200">Automatic Database Migration in Progress</p>
-            <p className="text-[11px] text-slate-300 mt-0.5">{autoMigrationStatus.message}</p>
+        <div className="p-4 rounded-2xl bg-gradient-to-r from-cyan-950/60 via-slate-900 to-blue-950/50 border border-cyan-500/40 text-xs space-y-2.5 shadow-lg">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-start gap-3">
+              <RefreshCw className="w-4 h-4 text-cyan-400 animate-spin shrink-0 mt-0.5" />
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="font-bold text-cyan-200">Automatic Database Migration in Progress</p>
+                  {migrationProgress && (
+                    <span className="px-2 py-0.5 rounded-full bg-cyan-500/15 border border-cyan-500/30 text-[10px] font-mono text-cyan-200">
+                      {migrationProgress.progressPercent}% • Batch {migrationProgress.currentBatch}/{migrationProgress.totalBatches} • {migrationProgress.recordsPerSec} rec/sec
+                    </span>
+                  )}
+                </div>
+                <p className="text-[11px] text-slate-300 mt-0.5">{autoMigrationStatus.message}</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={pauseMigration}
+                className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold transition cursor-pointer flex items-center gap-1.5"
+              >
+                <Pause className="w-3.5 h-3.5" />
+                <span>Pause</span>
+              </button>
+              <button
+                onClick={() => setIsMigrationOpen(true)}
+                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition cursor-pointer flex items-center gap-1.5"
+              >
+                <Database className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Monitor</span>
+              </button>
+            </div>
+          </div>
+          {migrationProgress && (
+            <div className="w-full h-1.5 rounded-full bg-slate-900 overflow-hidden">
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-blue-500 via-cyan-400 to-emerald-400 transition-all duration-300"
+                style={{ width: `${Math.min(100, Math.max(0, migrationProgress.progressPercent))}%` }}
+              />
+            </div>
+          )}
+        </div>
+      )}
+
+      {autoMigrationStatus.status === 'paused' && (
+        <div className="p-4 rounded-2xl bg-gradient-to-r from-amber-950/50 via-slate-900 to-slate-900 border border-amber-500/40 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg">
+          <div className="flex items-start gap-3">
+            <Pause className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-bold text-amber-200">Database Migration Paused at Checkpoint</p>
+              <p className="text-[11px] text-slate-300 mt-0.5">{autoMigrationStatus.message}</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => resumeMigration()}
+              className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition cursor-pointer flex items-center gap-1.5"
+            >
+              <Play className="w-3.5 h-3.5" />
+              <span>Resume</span>
+            </button>
+            <button
+              onClick={() => setIsMigrationOpen(true)}
+              className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition cursor-pointer flex items-center gap-1.5"
+            >
+              <Database className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Open Center</span>
+            </button>
           </div>
         </div>
       )}
@@ -302,7 +370,9 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate, onOpen
       )}
 
       {/* Legacy Database Migration / Recovery Notice Banner */}
-      {(migrationInspection?.hasLegacyAttendance || unregisteredRecovery.length > 0) && autoMigrationStatus.status !== 'migrating' && (
+      {(migrationInspection?.hasLegacyAttendance || unregisteredRecovery.length > 0) &&
+        autoMigrationStatus.status !== 'migrating' &&
+        autoMigrationStatus.status !== 'paused' && (
         <div className="p-4 rounded-2xl bg-gradient-to-r from-amber-950/40 via-slate-900 to-cyan-950/30 border border-amber-500/40 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg">
           <div className="flex items-start gap-3">
             <div className="w-9 h-9 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">

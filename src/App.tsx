@@ -1,7 +1,7 @@
 import React, { useState, Suspense, lazy } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { AttendanceProvider } from './context/AttendanceContext';
-import { getFirebaseAuth } from './services/firebase';
+import { getFirebaseAuth, RTDB_SECURITY_RULES_JSON } from './services/firebase';
 import { Sidebar, NavPage } from './components/Sidebar';
 import { Navbar } from './components/Navbar';
 import { RFIDScannerModal } from './components/RFIDScannerModal';
@@ -191,6 +191,7 @@ function AuthErrorScreen() {
   const { authError, authDiagnosticCode, authDiagnosticPath, profileMissing, retryProfileLoad, logout } = useAuth();
   const [retrying, setRetrying] = useState(false);
   const [copiedUid, setCopiedUid] = useState(false);
+  const [copiedRules, setCopiedRules] = useState(false);
 
   const currentFbUser = React.useMemo(() => {
     try {
@@ -299,11 +300,43 @@ function AuthErrorScreen() {
           </div>
 
           {/* Targeted Remediation Hint */}
-          <div className="p-3 rounded-xl bg-slate-900/70 border border-slate-800 text-slate-300 text-[11px] text-left mb-5 leading-relaxed">
+          <div className="p-3 rounded-xl bg-slate-900/70 border border-slate-800 text-slate-300 text-[11px] text-left mb-5 leading-relaxed space-y-2.5">
             {authDiagnosticCode === 'permission_denied' ? (
-              <span>
-                <strong>Administrator Fix:</strong> Publish the updated Realtime Database &amp; Firestore security rules from <span className="text-cyan-300 font-semibold">Admin Settings</span> so authenticated users can read their own <code className="text-cyan-300">/users/&#123;auth.uid&#125;</code> and linked student profile.
-              </span>
+              <>
+                <p>
+                  <strong>Why this happens:</strong> Live Firebase Realtime Database rules on{' '}
+                  <code className="text-cyan-300">rfid-attendance-system-5fccd</code> currently block{' '}
+                  <code className="text-cyan-300">/users/&#123;auth.uid&#125;</code> owner reads.
+                </p>
+                <ol className="list-decimal list-inside space-y-1 text-slate-300/90">
+                  <li>Click <strong>Copy Required RTDB Security Rules JSON</strong> below.</li>
+                  <li>
+                    Open{' '}
+                    <a
+                      href="https://console.firebase.google.com/project/rfid-attendance-system-5fccd/database/rfid-attendance-system-5fccd-default-rtdb/rules"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-cyan-300 underline hover:text-cyan-200 font-semibold"
+                    >
+                      Firebase Console &rarr; Realtime Database &rarr; Rules
+                    </a>
+                    , replace the rules, and click <strong>Publish</strong>.
+                  </li>
+                  <li>Return here and click <strong>Retry Profile Load</strong>.</li>
+                </ol>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(RTDB_SECURITY_RULES_JSON);
+                    setCopiedRules(true);
+                    setTimeout(() => setCopiedRules(false), 2500);
+                  }}
+                  className="w-full py-2 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-cyan-300 text-[11px] font-semibold transition flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  {copiedRules ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{copiedRules ? 'Copied RTDB Security Rules JSON!' : 'Copy Required RTDB Security Rules JSON'}</span>
+                </button>
+              </>
             ) : (
               <span>
                 <strong>Administrator Fix:</strong> Open <span className="text-cyan-300 font-semibold">Admin &rarr; Settings &rarr; Database Validation &amp; Recovery</span> (or edit the student in <span className="text-cyan-300 font-semibold">Students</span>) and link the Firebase UID shown above to your existing student record.

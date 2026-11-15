@@ -33,9 +33,11 @@ import {
 } from 'lucide-react';
 import { AttendanceRecord, AttendanceStatus, Student, TrashAttendanceRecord, AuditActivityLog } from '../types';
 import { useAttendance } from '../context/AttendanceContext';
+import { useAuth } from '../context/AuthContext';
 import { EditAttendanceModal } from '../components/EditAttendanceModal';
 import { OverrideAttendanceModal } from '../components/OverrideAttendanceModal';
 import { DeleteConfirmationModal } from '../components/DeleteConfirmationModal';
+import { DeleteAttendanceByDateModal } from '../components/DeleteAttendanceByDateModal';
 import { BulkStatusModal } from '../components/BulkStatusModal';
 import { StudentSuspensionModal } from '../components/StudentSuspensionModal';
 import { ESP32FirmwareGuideModal } from '../components/ESP32FirmwareGuideModal';
@@ -85,11 +87,16 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
   // Multi-select for Bulk Operations
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
 
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
+
   // Modal States
   const [editingRecord, setEditingRecord] = useState<AttendanceRecord | null>(null);
   const [overrideRecord, setOverrideRecord] = useState<AttendanceRecord | null>(null);
   const [recordsToDelete, setRecordsToDelete] = useState<AttendanceRecord[]>([]);
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+  const [isDeleteByDateModalOpen, setIsDeleteByDateModalOpen] = useState(false);
+  const [dateDeleteNotice, setDateDeleteNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [isBulkStatusModalOpen, setIsBulkStatusModalOpen] = useState(false);
   const [suspensionTargetStudent, setSuspensionTargetStudent] = useState<Student | null>(null);
   const [isFirmwareGuideOpen, setIsFirmwareGuideOpen] = useState(false);
@@ -320,6 +327,21 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
             <span>Manual Check-In</span>
           </button>
 
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={() => {
+                setDateDeleteNotice(null);
+                setIsDeleteByDateModalOpen(true);
+              }}
+              className="px-3.5 py-2 rounded-xl bg-red-600/15 hover:bg-red-600/25 text-red-300 hover:text-red-200 text-xs font-semibold border border-red-500/35 transition flex items-center gap-1.5 cursor-pointer"
+              title="Permanently delete all attendance records for a specific date"
+            >
+              <Trash2 className="w-3.5 h-3.5 text-red-400" />
+              <span>Delete Attendance by Date</span>
+            </button>
+          )}
+
           <button
             onClick={onOpenScanner}
             className="px-4 py-2 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 text-white text-xs font-bold shadow-lg shadow-blue-500/20 border border-blue-400/30 transition flex items-center gap-1.5 cursor-pointer"
@@ -329,6 +351,33 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
           </button>
         </div>
       </div>
+
+      {dateDeleteNotice && (
+        <div
+          className={`p-3.5 rounded-2xl border flex items-center justify-between gap-3 text-xs animate-in fade-in duration-150 ${
+            dateDeleteNotice.type === 'success'
+              ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200'
+              : 'bg-red-500/10 border-red-500/30 text-red-200'
+          }`}
+        >
+          <div className="flex items-center gap-2.5">
+            {dateDeleteNotice.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+            )}
+            <span>{dateDeleteNotice.message}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setDateDeleteNotice(null)}
+            className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800/70 transition cursor-pointer"
+            title="Dismiss notification"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* Date & Metrics Bar */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -1149,6 +1198,20 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
       <DatabaseMigrationModal
         isOpen={isMigrationModalOpen}
         onClose={() => setIsMigrationModalOpen(false)}
+      />
+
+      <DeleteAttendanceByDateModal
+        isOpen={isDeleteByDateModalOpen}
+        initialDate={selectedDate}
+        onClose={() => setIsDeleteByDateModalOpen(false)}
+        onSuccess={(res) => {
+          setSelectedDate(res.date);
+          setSelectedKeys(new Set());
+          setDateDeleteNotice({
+            type: 'success',
+            message: `${res.message} All dashboards, reports, and monthly percentages have been synchronized.`,
+          });
+        }}
       />
     </div>
   );

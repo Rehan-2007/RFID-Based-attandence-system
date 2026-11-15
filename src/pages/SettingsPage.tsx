@@ -28,7 +28,8 @@ import {
   runDatabaseDiagnostics,
   autoRepairDatabaseDiagnostics,
   linkAuthUidToStudent,
-  provisionAuthForExistingStudent
+  provisionAuthForExistingStudent,
+  RTDB_SECURITY_RULES_JSON
 } from '../services/firebase';
 import { useAttendance } from '../context/AttendanceContext';
 import { useAuth } from '../context/AuthContext';
@@ -509,142 +510,7 @@ void loop() {
 }`;
 
   // Production Security Rules matching database.rules.json (Unified students/{studentId}/attendance/{DATE})
-  const rtdbSecurityRules = `{
-  "rules": {
-    ".read": false,
-    ".write": false,
-
-    "students": {
-      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')",
-      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
-
-      "$studentId": {
-        ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82' || data.child('authUid').val() === auth.uid || root.child('users').child(auth.uid).child('studentDbId').val() === $studentId || root.child('users').child(auth.uid).child('rfidUID').val() === $studentId || root.child('auth_to_student').child(auth.uid).child('studentDbId').val() === $studentId || (data.child('email').val() != null && auth.token.email != null && data.child('email').val().toLowerCase() === auth.token.email.toLowerCase()))",
-        ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
-
-        "attendance": {
-          ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82' || data.parent().child('authUid').val() === auth.uid || root.child('users').child(auth.uid).child('studentDbId').val() === $studentId || root.child('users').child(auth.uid).child('rfidUID').val() === $studentId || root.child('auth_to_student').child(auth.uid).child('studentDbId').val() === $studentId || (data.parent().child('email').val() != null && auth.token.email != null && data.parent().child('email').val().toLowerCase() === auth.token.email.toLowerCase()))",
-          ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
-
-          "$date": {
-            ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82' || data.parent().parent().child('authUid').val() === auth.uid || root.child('users').child(auth.uid).child('studentDbId').val() === $studentId || root.child('users').child(auth.uid).child('rfidUID').val() === $studentId || root.child('auth_to_student').child(auth.uid).child('studentDbId').val() === $studentId || (data.parent().parent().child('email').val() != null && auth.token.email != null && data.parent().parent().child('email').val().toLowerCase() === auth.token.email.toLowerCase()))",
-            ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || (auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82' && data.parent().parent().exists() && data.parent().parent().child('status').val() === 'active' && data.parent().parent().child('isSuspended').val() !== true && (!data.exists() || data.child('isOverridden').val() !== true)))",
-            ".validate": "newData.hasChildren(['date', 'status', 'time', 'timestamp'])"
-          }
-        }
-      }
-    },
-
-    "working_days": {
-      ".read": "auth != null",
-      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')"
-    },
-
-    "settings": {
-      ".read": "auth != null",
-      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
-    },
-
-    "users": {
-      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
-      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
-      "$authUid": {
-        ".read": "auth != null && (auth.uid === $authUid || auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
-        ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
-        ".validate": "newData.hasChildren(['role']) && (newData.child('role').val() === 'admin' || newData.child('role').val() === 'student')"
-      }
-    },
-
-    "auth_to_student": {
-      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
-      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
-      "$authUid": {
-        ".read": "auth != null && (auth.uid === $authUid || auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
-        ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
-      }
-    },
-
-    "rfid_to_student": {
-      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')",
-      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
-    },
-
-    "rfid_to_uid": {
-      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')",
-      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
-    },
-
-    "attendance_trash": {
-      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
-      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
-    },
-
-    "audit_logs": {
-      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
-      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
-    },
-
-    "auditLogs": {
-      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
-      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
-    },
-
-    "suspensions": {
-      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
-      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
-      "$studentId": {
-        ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || root.child('students').child($studentId).child('authUid').val() === auth.uid || root.child('users').child(auth.uid).child('studentDbId').val() === $studentId || root.child('users').child(auth.uid).child('rfidUID').val() === $studentId || root.child('auth_to_student').child(auth.uid).child('studentDbId').val() === $studentId)"
-      }
-    },
-
-    "backups": {
-      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
-      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
-    },
-
-    "database_backups": {
-      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
-      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
-    },
-
-    "migration_recovery": {
-      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
-      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
-    },
-
-    "migration_status": {
-      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
-      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
-    },
-
-    "deviceCommands": {
-      "esp32": {
-        ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')",
-        ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')"
-      }
-    },
-
-    "unknown_scans": {
-      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
-      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')"
-    },
-
-    "devices": {
-      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')",
-      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')"
-    },
-
-    "attendance": {
-      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
-      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
-    },
-
-    "students_attendance": {
-      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
-      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
-    }
-  }
-}`;
+  const rtdbSecurityRules = RTDB_SECURITY_RULES_JSON;
 
   const copyToClipboard = (text: string, type: 'code' | 'rules') => {
     navigator.clipboard.writeText(text);

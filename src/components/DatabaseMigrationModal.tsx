@@ -1,10 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   X,
   Database,
   ShieldCheck,
   Download,
   Play,
+  Pause,
+  RotateCcw,
   CheckCircle2,
   AlertTriangle,
   RefreshCw,
@@ -13,15 +15,27 @@ import {
   Trash2,
   FolderArchive,
   Layers,
+  Gauge,
+  Clock,
+  FileText,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { useAttendance } from '../context/AttendanceContext';
 import { useAuth } from '../context/AuthContext';
-import { CONFIGURED_ADMIN_UID } from '../services/firebase';
+import { CONFIGURED_ADMIN_UID, DEFAULT_MIGRATION_BATCH_SIZE } from '../services/firebase';
 import { MigrationResult } from '../types';
+import { getISTClockTime } from '../utils/dateUtils';
 
 interface DatabaseMigrationModalProps {
   isOpen: boolean;
   onClose: () => void;
+}
+
+function formatDurationMs(ms?: number): string {
+  if (!ms || ms <= 0) return '0ms';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(2)}s`;
 }
 
 export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
@@ -32,9 +46,14 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
   const {
     studentsList,
     migrationInspection,
+    migrationProgress,
+    migrationCheckpoint,
     unregisteredRecovery,
     refreshMigrationInspection,
     executeDatabaseMigration,
+    pauseMigration,
+    resumeMigration,
+    retryFailedMigration,
     downloadDatabaseBackup,
     assignRecoveredRecords,
     dismissRecoveredRecords,
@@ -43,6 +62,8 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
   const [isInspecting, setIsInspecting] = useState(false);
   const [isBackingUp, setIsBackingUp] = useState(false);
   const [isMigrating, setIsMigrating] = useState(false);
+  const [batchSize, setBatchSize] = useState<number>(DEFAULT_MIGRATION_BATCH_SIZE);
+  const [showLogs, setShowLogs] = useState<boolean>(false);
   const [backupMessage, setBackupMessage] = useState<string | null>(null);
   const [migrationResult, setMigrationResult] = useState<MigrationResult | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -56,7 +77,124 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
     }
   }, [isOpen, refreshMigrationInspection]);
 
+  const isRunning = isMigrating || migrationProgress?.status === 'running';
+
+  const metrics = useMemo(() => {
+    const legacyTotal =
+      migrationProgress?.totalLegacy ??
+      migrationResult?.totalLegacyCount ??
+      migrationCheckpoint?.totalLegacyCount ??
+      migrationInspection?.legacyRecordCount ??
+      0;
+
+    const alreadyMigrated =
+      migrationProgress?.alreadyMigrated ??
+      migrationResult?.alreadyMigratedCount ??
+      migrationCheckpoint?.skippedCount ??
+      0;
+
+    const succeeded =
+      migrationProgress?.succeeded ??
+      migrationResult?.migratedCount ??
+      migrationCheckpoint?.migratedCount ??
+      0;
+
+    const unregistered =
+      migrationProgress?.unregistered ??
+      migrationResult?.unregisteredCount ??
+      migrationCheckpoint?.unregisteredCount ??
+      migrationInspection?.unregisteredCount ??
+      0;
+
+    const failed =
+      migrationProgress?.failed ??
+      migrationResult?.failedCount ??
+      migrationCheckpoint?.failedCount ??
+      0;
+
+    const completedTotal = alreadyMigrated + succeeded + unregistered;
+    const pending =
+      migrationProgress?.pending ??
+      Math.max(0, legacyTotal - completedTotal);
+
+    const currentBatch = migrationProgress?.currentBatch ?? migrationCheckpoint?.currentBatch ?? 0;
+    const totalBatches =
+      migrationProgress?.totalBatches ??
+      migrationCheckpoint?.totalBatches ??
+      (legacyTotal > 0 ? Math.ceil(legacyTotal / batchSize) : 0);
+
+    const progressPercent =
+      migrationProgress?.progressPercent ??
+      (legacyTotal > 0 ? Math.min(100, Math.round((completedTotal / legacyTotal) * 100)) : migrationInspection?.hasLegacyAttendance ? 0 : 100);
+
+    const recordsPerSec =
+      migrationProgress?.recordsPerSec ??
+      migrationResult?.recordsPerSec ??
+      0;
+
+    const durationMs =
+      migrationProgress?.durationMs ??
+      migrationResult?.durationMs ??
+      0;
+
+    const lastCheckpointAt =
+      migrationProgress?.lastCheckpointAt ??
+      migrationResult?.lastCheckpointAt ??
+      migrationCheckpoint?.lastCheckpointAt;
+
+    const verificationStatus: 'pending' | 'verifying' | 'verified' | 'partial' | 'failed' =
+      migrationProgress?.verificationStatus ??
+      (migrationResult
+        ? migrationResult.success
+          ? 'verified'
+          : migrationResult.paused
+            ? 'partial'
+            : 'failed'
+        : migrationCheckpoint?.status === 'completed'
+          ? 'verified'
+          : migrationCheckpoint?.status === 'paused'
+            ? 'partial'
+            : migrationCheckpoint?.status === 'error'
+              ? 'failed'
+              : migrationInspection?.hasLegacyAttendance
+                ? 'pending'
+                : 'verified');
+
+    const logs =
+      (migrationProgress?.logs && migrationProgress.logs.length > 0 ? migrationProgress.logs : undefined) ||
+      migrationResult?.recordLogs ||
+      [];
+
+    return {
+      legacyTotal,
+      alreadyMigrated,
+      pending,
+      succeeded,
+      failed,
+      unregistered,
+      currentBatch,
+      totalBatches,
+      progressPercent,
+      recordsPerSec,
+      durationMs,
+      lastCheckpointAt,
+      verificationStatus,
+      logs,
+    };
+  }, [migrationProgress, migrationResult, migrationCheckpoint, migrationInspection, batchSize]);
+
   if (!isOpen) return null;
+
+  const canResume =
+    !isRunning &&
+    (migrationProgress?.status === 'paused' ||
+      migrationCheckpoint?.status === 'paused' ||
+      migrationResult?.paused ||
+      (metrics.pending > 0 && (migrationCheckpoint?.processedCount ?? 0) > 0));
+
+  const hasFailedRecords =
+    !isRunning &&
+    (metrics.failed > 0 || (migrationCheckpoint?.failedItems?.length ?? 0) > 0);
 
   const handleRefresh = async () => {
     setIsInspecting(true);
@@ -81,28 +219,47 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
     }
   };
 
-  const handleRunMigration = async () => {
+  const handleMigrationResult = (res: MigrationResult) => {
+    setMigrationResult(res);
+    if (!res.success && !res.paused) {
+      if (res.failedOperation || res.failedPath) {
+        setErrorMsg(
+          `Operation "${res.failedOperation || 'MIGRATION'}" failed at path "${res.failedPath || 'unknown'}": ${
+            res.errors.join(' | ') || res.message
+          }`
+        );
+      } else if (res.errors.length > 0) {
+        setErrorMsg(res.errors.join(' | '));
+      } else {
+        setErrorMsg(res.message);
+      }
+    }
+  };
+
+  const handleRunMigration = async (resume = false) => {
     setIsMigrating(true);
     setErrorMsg(null);
     setMigrationResult(null);
     try {
-      const res = await executeDatabaseMigration();
-      setMigrationResult(res);
-      if (!res.success) {
-        if (res.failedOperation || res.failedPath) {
-          setErrorMsg(
-            `Operation "${res.failedOperation || 'MIGRATION'}" failed at path "${res.failedPath || 'unknown'}": ${
-              res.errors.join(' | ') || res.message
-            }`
-          );
-        } else if (res.errors.length > 0) {
-          setErrorMsg(res.errors.join(' | '));
-        } else {
-          setErrorMsg(res.message);
-        }
-      }
+      const res = resume
+        ? await resumeMigration(batchSize)
+        : await executeDatabaseMigration({ batchSize, resume: false });
+      handleMigrationResult(res);
     } catch (err: any) {
       setErrorMsg(err?.message || 'Migration execution failed.');
+    } finally {
+      setIsMigrating(false);
+    }
+  };
+
+  const handleRetryFailed = async () => {
+    setIsMigrating(true);
+    setErrorMsg(null);
+    try {
+      const res = await retryFailedMigration(batchSize);
+      handleMigrationResult(res);
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Retrying failed records encountered an error.');
     } finally {
       setIsMigrating(false);
     }
@@ -139,9 +296,20 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
       ? unregisteredRecovery
       : migrationInspection?.unregisteredGroups || [];
 
+  const verificationBadgeClass =
+    metrics.verificationStatus === 'verified'
+      ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+      : metrics.verificationStatus === 'verifying'
+        ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
+        : metrics.verificationStatus === 'partial'
+          ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+          : metrics.verificationStatus === 'failed'
+            ? 'bg-rose-500/15 text-rose-300 border-rose-500/30'
+            : 'bg-slate-800 text-slate-300 border-slate-700';
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md">
-      <div className="relative w-full max-w-3xl rounded-3xl bg-[#0c1220] border border-cyan-500/30 shadow-2xl overflow-hidden max-h-[90vh] flex flex-col">
+      <div className="relative w-full max-w-4xl rounded-3xl bg-[#0c1220] border border-cyan-500/30 shadow-2xl overflow-hidden max-h-[92vh] flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between p-5 border-b border-slate-800 bg-slate-900/70">
           <div className="flex items-center gap-3">
@@ -149,22 +317,23 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
               <Layers className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="text-base font-bold text-white flex items-center gap-2">
+              <h3 className="text-base font-bold text-white flex flex-wrap items-center gap-2">
                 <span>Unified Database Migration & Recovery Center</span>
                 <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 text-[10px] font-mono border border-emerald-500/20">
                   students/&#123;UID&#125;/attendance
                 </span>
               </h3>
               <p className="text-xs text-slate-400 mt-0.5">
-                Safe, backed-up, idempotent restructuring from legacy root attendance/ into unified students/
+                Batched, checkpointed, pausable, and idempotent migration from legacy root attendance/ into unified students/
               </p>
             </div>
           </div>
 
           <button
             onClick={onClose}
-            disabled={isMigrating}
+            disabled={isRunning}
             className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition cursor-pointer disabled:opacity-40"
+            title={isRunning ? 'Pause migration before closing' : 'Close'}
           >
             <X className="w-5 h-5" />
           </button>
@@ -187,7 +356,7 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
             <div className="flex flex-col items-center justify-center text-cyan-400 gap-1">
               <ArrowRight className="w-5 h-5 hidden md:block" />
               <span className="text-[10px] font-mono uppercase text-slate-400">
-                100% Parity Merge
+                100% Parity Batched Merge
               </span>
             </div>
 
@@ -224,8 +393,8 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
               </div>
               <button
                 onClick={handleRefresh}
-                disabled={isInspecting || isMigrating}
-                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-semibold flex items-center gap-1.5 cursor-pointer"
+                disabled={isInspecting || isRunning}
+                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-semibold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
               >
                 <RefreshCw className={`w-3 h-3 ${isInspecting ? 'animate-spin' : ''}`} />
                 <span>Re-Scan RTDB</span>
@@ -291,6 +460,103 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
             </div>
           </div>
 
+          {/* Migration Performance Dashboard */}
+          <div className="p-4 rounded-2xl bg-slate-950/90 border border-slate-800 space-y-3.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h4 className="font-bold text-slate-200 flex items-center gap-2">
+                <Gauge className="w-4 h-4 text-cyan-400" />
+                <span>Migration Performance Dashboard</span>
+              </h4>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className={`px-2 py-0.5 rounded-full text-[10px] font-mono uppercase border ${verificationBadgeClass}`}>
+                  Verification: {metrics.verificationStatus}
+                </span>
+                <span className="px-2 py-0.5 rounded-full bg-slate-900 border border-slate-800 text-[10px] font-mono text-cyan-300">
+                  {metrics.progressPercent}% Complete
+                </span>
+              </div>
+            </div>
+
+            {/* Progress Bar */}
+            <div className="space-y-1.5">
+              <div className="w-full h-2.5 rounded-full bg-slate-900 border border-slate-800 overflow-hidden">
+                <div
+                  className={`h-full rounded-full transition-all duration-300 ${
+                    metrics.verificationStatus === 'failed'
+                      ? 'bg-rose-500'
+                      : migrationProgress?.status === 'paused'
+                        ? 'bg-amber-500'
+                        : 'bg-gradient-to-r from-blue-500 via-cyan-400 to-emerald-400'
+                  }`}
+                  style={{ width: `${Math.min(100, Math.max(0, metrics.progressPercent))}%` }}
+                />
+              </div>
+              {migrationProgress?.message && (
+                <p className="text-[11px] font-mono text-slate-300 truncate" title={migrationProgress.message}>
+                  {migrationProgress.message}
+                </p>
+              )}
+            </div>
+
+            {/* 11 Performance Metrics Grid */}
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 text-[11px] font-mono">
+              <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-800">
+                <span className="text-[9px] text-slate-400 uppercase block">Total Legacy</span>
+                <span className="text-sm font-black text-white">{metrics.legacyTotal}</span>
+              </div>
+
+              <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-800">
+                <span className="text-[9px] text-slate-400 uppercase block">Already Migrated</span>
+                <span className="text-sm font-black text-cyan-300">{metrics.alreadyMigrated}</span>
+              </div>
+
+              <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-800">
+                <span className="text-[9px] text-slate-400 uppercase block">Pending</span>
+                <span className="text-sm font-black text-amber-300">{metrics.pending}</span>
+              </div>
+
+              <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-800">
+                <span className="text-[9px] text-slate-400 uppercase block">Succeeded</span>
+                <span className="text-sm font-black text-emerald-400">{metrics.succeeded}</span>
+              </div>
+
+              <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-800">
+                <span className="text-[9px] text-slate-400 uppercase block">Failed</span>
+                <span className={`text-sm font-black ${metrics.failed > 0 ? 'text-rose-400' : 'text-slate-400'}`}>
+                  {metrics.failed}
+                </span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-[11px] font-mono">
+              <div className="p-2.5 rounded-xl bg-slate-900/70 border border-slate-800/80">
+                <span className="text-[9px] text-slate-400 uppercase block">Current Batch</span>
+                <span className="text-xs font-bold text-slate-200">
+                  {metrics.currentBatch} / {metrics.totalBatches} ({batchSize}/batch)
+                </span>
+              </div>
+
+              <div className="p-2.5 rounded-xl bg-slate-900/70 border border-slate-800/80">
+                <span className="text-[9px] text-slate-400 uppercase block">Processing Speed</span>
+                <span className="text-xs font-bold text-cyan-300">{metrics.recordsPerSec} rec/sec</span>
+              </div>
+
+              <div className="p-2.5 rounded-xl bg-slate-900/70 border border-slate-800/80">
+                <span className="text-[9px] text-slate-400 uppercase block">Duration</span>
+                <span className="text-xs font-bold text-slate-200">{formatDurationMs(metrics.durationMs)}</span>
+              </div>
+
+              <div className="p-2.5 rounded-xl bg-slate-900/70 border border-slate-800/80">
+                <span className="text-[9px] text-slate-400 uppercase flex items-center gap-1">
+                  <Clock className="w-2.5 h-2.5" /> Last Checkpoint
+                </span>
+                <span className="text-xs font-bold text-emerald-300">
+                  {metrics.lastCheckpointAt ? getISTClockTime(metrics.lastCheckpointAt) : 'None yet'}
+                </span>
+              </div>
+            </div>
+          </div>
+
           {/* Alerts */}
           {(errorMsg || migrationInspection?.inspectionError) && (
             <div className="p-3.5 rounded-xl bg-rose-950/50 border border-rose-500/50 text-rose-200 flex items-start gap-2.5">
@@ -321,13 +587,17 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
               className={`p-4 rounded-2xl border space-y-3 ${
                 migrationResult.success
                   ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-200'
-                  : 'bg-rose-950/30 border-rose-500/40 text-rose-200'
+                  : migrationResult.paused
+                    ? 'bg-amber-950/30 border-amber-500/40 text-amber-200'
+                    : 'bg-rose-950/30 border-rose-500/40 text-rose-200'
               }`}
             >
               <div className="flex items-center justify-between gap-2 font-bold">
                 <div className="flex items-center gap-2">
                   {migrationResult.success ? (
                     <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  ) : migrationResult.paused ? (
+                    <Pause className="w-4 h-4 text-amber-400 shrink-0" />
                   ) : (
                     <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
                   )}
@@ -358,7 +628,7 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
                   Migrated: <strong>{migrationResult.migratedCount}</strong>
                 </div>
                 <div className="p-2 rounded bg-black/30">
-                  Merged/Skipped: <strong>{migrationResult.skippedDuplicateCount}</strong>
+                  Already Synced: <strong>{migrationResult.skippedDuplicateCount}</strong>
                 </div>
                 <div className="p-2 rounded bg-black/30">
                   Recovery Vault: <strong>{migrationResult.unregisteredCount}</strong>
@@ -368,13 +638,135 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
                 </div>
               </div>
 
-              {migrationResult.recordLogs && migrationResult.recordLogs.length > 0 && (
-                <div className="space-y-1.5 pt-1">
-                  <p className="text-[10px] font-mono uppercase tracking-wider text-slate-300">
-                    Per-Record Verification Log ({migrationResult.recordLogs.length})
+              {migrationResult.errors && migrationResult.errors.length > 0 && (
+                <div className="p-2.5 rounded-xl bg-rose-950/40 border border-rose-500/30 text-[11px] font-mono text-rose-200 space-y-1">
+                  <p className="font-bold text-rose-300">Reported Errors ({migrationResult.errors.length}):</p>
+                  <ul className="list-disc pl-4 space-y-0.5">
+                    {migrationResult.errors.map((err, idx) => (
+                      <li key={idx}>{err}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Action Controls */}
+          <div className="p-4 rounded-2xl bg-slate-900/70 border border-slate-800 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <p className="font-bold text-white">Migration Controls &amp; Checkpointed Execution</p>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  Multi-location batch updates with backup verification, automatic pause/resume checkpoints, and retry support.
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <label className="text-[10px] font-mono uppercase text-slate-400">Batch Size:</label>
+                <select
+                  value={batchSize}
+                  onChange={(e) => setBatchSize(Number(e.target.value))}
+                  disabled={isRunning}
+                  className="px-2 py-1 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 text-xs font-mono disabled:opacity-50"
+                >
+                  <option value={50}>50 rec</option>
+                  <option value={100}>100 rec</option>
+                  <option value={200}>200 rec</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={() => handleRunMigration(false)}
+                disabled={isRunning}
+                className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 text-white font-bold shadow-lg shadow-emerald-500/20 transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              >
+                {isRunning ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                <span>
+                  {isRunning
+                    ? 'Migrating Batches...'
+                    : migrationInspection?.hasLegacyAttendance
+                      ? 'Start Migration'
+                      : 'Verify Unified Tree'}
+                </span>
+              </button>
+
+              {isRunning && (
+                <button
+                  onClick={pauseMigration}
+                  className="px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-bold transition flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Pause className="w-3.5 h-3.5" />
+                  <span>Pause</span>
+                </button>
+              )}
+
+              {canResume && (
+                <button
+                  onClick={() => handleRunMigration(true)}
+                  className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold transition flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Play className="w-3.5 h-3.5" />
+                  <span>Resume</span>
+                </button>
+              )}
+
+              {hasFailedRecords && (
+                <button
+                  onClick={handleRetryFailed}
+                  className="px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold transition flex items-center gap-1.5 cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Retry Failed ({metrics.failed || migrationCheckpoint?.failedItems?.length || 0})</span>
+                </button>
+              )}
+
+              <button
+                onClick={handleBackup}
+                disabled={isBackingUp || isRunning}
+                className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold border border-slate-700 transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              >
+                <Download className={`w-3.5 h-3.5 text-cyan-400 ${isBackingUp ? 'animate-bounce' : ''}`} />
+                <span>{isBackingUp ? 'Backing up...' : 'Download JSON Backup'}</span>
+              </button>
+
+              <button
+                onClick={() => setShowLogs((prev) => !prev)}
+                className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold border border-slate-700 transition flex items-center gap-1.5 cursor-pointer ml-auto"
+              >
+                <FileText className="w-3.5 h-3.5 text-blue-400" />
+                <span>View Migration Logs ({metrics.logs.length})</span>
+                {showLogs ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+              </button>
+            </div>
+
+            {showLogs && (
+              <div className="pt-2 border-t border-slate-800 space-y-2">
+                {migrationCheckpoint?.failedItems && migrationCheckpoint.failedItems.length > 0 && (
+                  <div className="p-2.5 rounded-xl bg-rose-950/30 border border-rose-500/30 space-y-1 font-mono text-[10px]">
+                    <p className="font-bold text-rose-300 uppercase">
+                      Checkpoint Failed Items ({migrationCheckpoint.failedItems.length})
+                    </p>
+                    {migrationCheckpoint.failedItems.map((fi) => (
+                      <div key={fi.key} className="text-rose-200 flex items-center justify-between gap-2">
+                        <span>
+                          {fi.uid} • {fi.date} ({fi.targetPath})
+                        </span>
+                        <span className="truncate max-w-[240px]" title={fi.error}>
+                          {fi.error}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {metrics.logs.length === 0 ? (
+                  <p className="text-[11px] font-mono text-slate-500 py-2">
+                    No migration record logs recorded in this session yet.
                   </p>
-                  <div className="max-h-40 overflow-y-auto space-y-1 pr-1 font-mono text-[10px]">
-                    {migrationResult.recordLogs.map((log, i) => (
+                ) : (
+                  <div className="max-h-48 overflow-y-auto space-y-1 pr-1 font-mono text-[10px]">
+                    {metrics.logs.map((log, i) => (
                       <div
                         key={`${log.uid}-${log.date}-${i}`}
                         className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-black/35 border border-white/10"
@@ -396,65 +788,15 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
                           <span className="text-white font-semibold">{log.uid}</span>
                           <span className="text-slate-400">{log.date}</span>
                         </div>
-                        <span className="text-slate-400 truncate max-w-[260px]" title={log.message || log.targetPath}>
+                        <span className="text-slate-400 truncate max-w-[280px]" title={log.message || log.targetPath}>
                           {log.message || log.targetPath}
                         </span>
                       </div>
                     ))}
                   </div>
-                </div>
-              )}
-
-              {migrationResult.errors && migrationResult.errors.length > 0 && (
-                <div className="p-2.5 rounded-xl bg-rose-950/40 border border-rose-500/30 text-[11px] font-mono text-rose-200 space-y-1">
-                  <p className="font-bold text-rose-300">Reported Errors ({migrationResult.errors.length}):</p>
-                  <ul className="list-disc pl-4 space-y-0.5">
-                    {migrationResult.errors.map((err, idx) => (
-                      <li key={idx}>{err}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Action Buttons */}
-          <div className="p-4 rounded-2xl bg-slate-900/70 border border-slate-800 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-            <div>
-              <p className="font-bold text-white">Backup & Verified Execution</p>
-              <p className="text-[11px] text-slate-400 mt-0.5">
-                Creates an automatic RTDB snapshot before moving records. Legacy data is only removed after 100% parity verification.
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2 shrink-0">
-              <button
-                onClick={handleBackup}
-                disabled={isBackingUp || isMigrating}
-                className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold border border-slate-700 transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-              >
-                <Download className={`w-3.5 h-3.5 text-cyan-400 ${isBackingUp ? 'animate-bounce' : ''}`} />
-                <span>{isBackingUp ? 'Backing up...' : 'Download JSON Backup'}</span>
-              </button>
-
-              <button
-                onClick={handleRunMigration}
-                disabled={isMigrating}
-                className="px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 text-white font-bold shadow-lg shadow-emerald-500/20 transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-              >
-                {isMigrating ? (
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <Play className="w-3.5 h-3.5" />
                 )}
-                <span>
-                  {isMigrating
-                    ? 'Backing up & Migrating...'
-                    : migrationInspection?.hasLegacyAttendance
-                    ? 'Run Verified Migration'
-                    : 'Verify & Re-Check Unified Tree'}
-                </span>
-              </button>
-            </div>
+              </div>
+            )}
           </div>
 
           {/* Unregistered Recovery Queue */}
@@ -555,8 +897,8 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
           </span>
           <button
             onClick={onClose}
-            disabled={isMigrating}
-            className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold transition cursor-pointer"
+            disabled={isRunning}
+            className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold transition cursor-pointer disabled:opacity-40"
           >
             Close
           </button>

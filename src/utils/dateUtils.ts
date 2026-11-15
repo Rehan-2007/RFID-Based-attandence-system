@@ -187,3 +187,45 @@ export function isAfterISTDeadline(deadlineHHMM: string = '10:30', now?: Date | 
   const currentHHMM = getISTHourMinute(now);
   return currentHHMM >= cleanDeadline;
 }
+
+/**
+ * Normalizes various date string formats (YYYY-MM-DD, YYYY/MM/DD, DD/MM/YYYY, DD-MM-YYYY, ISO strings)
+ * into a canonical YYYY-MM-DD string in IST without UTC day-boundary drift.
+ * Returns null if the input cannot be validated as a real calendar date.
+ */
+export function normalizeToISODate(input?: string | null): string | null {
+  if (!input || typeof input !== 'string') return null;
+  const raw = input.trim();
+  if (!raw) return null;
+
+  // 1. Canonical YYYY-MM-DD
+  if (isValidDateStr(raw)) return raw;
+
+  // 2. YYYY/MM/DD or YYYY.MM.DD
+  const ymdSlash = raw.match(/^(\d{4})[/.](\d{1,2})[/.](\d{1,2})$/);
+  if (ymdSlash) {
+    const candidate = `${ymdSlash[1]}-${ymdSlash[2].padStart(2, '0')}-${ymdSlash[3].padStart(2, '0')}`;
+    return isValidDateStr(candidate) ? candidate : null;
+  }
+
+  // 3. DD/MM/YYYY or DD-MM-YYYY
+  const dmyMatch = raw.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/);
+  if (dmyMatch) {
+    const day = dmyMatch[1].padStart(2, '0');
+    const month = dmyMatch[2].padStart(2, '0');
+    const year = dmyMatch[3];
+    const candidate = `${year}-${month}-${day}`;
+    if (isValidDateStr(candidate)) return candidate;
+  }
+
+  // 4. ISO timestamp with T (e.g. 2026-11-12T15:30:21Z or +05:30)
+  if (/^\d{4}-\d{2}-\d{2}T/.test(raw)) {
+    const parsed = new Date(raw);
+    if (!isNaN(parsed.getTime())) {
+      const istStr = getISTDateStr(parsed);
+      return isValidDateStr(istStr) ? istStr : null;
+    }
+  }
+
+  return null;
+}

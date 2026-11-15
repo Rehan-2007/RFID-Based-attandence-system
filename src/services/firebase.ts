@@ -23,6 +23,13 @@ import {
   update, 
   remove, 
   onValue, 
+  onChildAdded,
+  onChildChanged,
+  onChildRemoved,
+  query as rtdbQuery,
+  orderByChild,
+  equalTo,
+  limitToLast,
   off, 
   runTransaction,
   DataSnapshot,
@@ -60,6 +67,10 @@ import {
   MigrationInspection,
   MigrationResult,
   MigrationRecordLog,
+  MigrationProgress,
+  MigrationCheckpoint,
+  MigrationFailedItem,
+  DashboardAggregates,
   AttendanceSettings,
   UnregisteredAttendanceGroup,
   DbDiagnosticCode,
@@ -74,6 +85,7 @@ import {
   getISTTimestampDisplay,
   isValidDateStr,
   isValidDeadlineHHMM,
+  normalizeToISODate,
 } from '../utils/dateUtils';
 
 const STORAGE_KEY_FIREBASE_CONFIG = 'rfid_firebase_config_override';
@@ -141,6 +153,148 @@ export const CONFIGURED_PROJECT_ID = 'rfid-attendance-system-5fccd';
 export const CONFIGURED_DATABASE_URL = 'https://rfid-attendance-system-5fccd-default-rtdb.firebaseio.com';
 export const PROJECT_FIREBASE_API_KEY = 'AIzaSyCg52LDce_ACHrJV1FqOTqcLndG9i77J3g';
 
+export const RTDB_SECURITY_RULES_JSON = `{
+  "rules": {
+    ".read": false,
+    ".write": false,
+
+    "students": {
+      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+      ".indexOn": ["rfidUID", "authUid", "studentId", "email", "status"],
+
+      "$studentId": {
+        ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82' || data.child('authUid').val() === auth.uid || root.child('users').child(auth.uid).child('studentDbId').val() === $studentId || root.child('users').child(auth.uid).child('rfidUID').val() === $studentId || root.child('auth_to_student').child(auth.uid).child('studentDbId').val() === $studentId || root.child('auth_to_student').child(auth.uid).val() === $studentId || (data.child('email').isString() && auth.token.email != null && data.child('email').val().toLowerCase() === auth.token.email.toLowerCase()))",
+        ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+
+        "attendance": {
+          ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82' || data.parent().child('authUid').val() === auth.uid || root.child('users').child(auth.uid).child('studentDbId').val() === $studentId || root.child('users').child(auth.uid).child('rfidUID').val() === $studentId || root.child('auth_to_student').child(auth.uid).child('studentDbId').val() === $studentId || root.child('auth_to_student').child(auth.uid).val() === $studentId || (data.parent().child('email').isString() && auth.token.email != null && data.parent().child('email').val().toLowerCase() === auth.token.email.toLowerCase()))",
+          ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+
+          "$date": {
+            ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82' || data.parent().parent().child('authUid').val() === auth.uid || root.child('users').child(auth.uid).child('studentDbId').val() === $studentId || root.child('users').child(auth.uid).child('rfidUID').val() === $studentId || root.child('auth_to_student').child(auth.uid).child('studentDbId').val() === $studentId || root.child('auth_to_student').child(auth.uid).val() === $studentId || (data.parent().parent().child('email').isString() && auth.token.email != null && data.parent().parent().child('email').val().toLowerCase() === auth.token.email.toLowerCase()))",
+            ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || (auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82' && data.parent().parent().exists() && data.parent().parent().child('status').val() === 'active' && data.parent().parent().child('isSuspended').val() !== true && (!data.exists() || data.child('isOverridden').val() !== true)))",
+            ".validate": "newData.hasChildren(['date', 'status', 'time', 'timestamp'])"
+          }
+        }
+      }
+    },
+
+    "working_days": {
+      ".read": "auth != null",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')"
+    },
+
+    "settings": {
+      ".read": "auth != null",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
+    },
+
+    "users": {
+      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+      "$authUid": {
+        ".read": "auth != null && (auth.uid === $authUid || auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+        ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+        ".validate": "newData.hasChildren(['role']) && (newData.child('role').val() === 'admin' || newData.child('role').val() === 'student')"
+      }
+    },
+
+    "auth_to_student": {
+      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+      "$authUid": {
+        ".read": "auth != null && (auth.uid === $authUid || auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+        ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
+      }
+    },
+
+    "rfid_to_student": {
+      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
+    },
+
+    "rfid_to_uid": {
+      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
+    },
+
+    "attendance_trash": {
+      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+      ".indexOn": ["deletedAt", "date"]
+    },
+
+    "audit_logs": {
+      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+      ".indexOn": ["timestamp", "action"]
+    },
+
+    "auditLogs": {
+      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
+    },
+
+    "suspensions": {
+      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+      "$studentId": {
+        ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || root.child('students').child($studentId).child('authUid').val() === auth.uid || root.child('users').child(auth.uid).child('studentDbId').val() === $studentId || root.child('users').child(auth.uid).child('rfidUID').val() === $studentId || root.child('auth_to_student').child(auth.uid).child('studentDbId').val() === $studentId || root.child('auth_to_student').child(auth.uid).val() === $studentId || (root.child('students').child($studentId).child('email').isString() && auth.token.email != null && root.child('students').child($studentId).child('email').val().toLowerCase() === auth.token.email.toLowerCase()))"
+      }
+    },
+
+    "backups": {
+      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+      ".indexOn": ["createdAt"]
+    },
+
+    "database_backups": {
+      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
+    },
+
+    "migration_recovery": {
+      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
+    },
+
+    "migration_status": {
+      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
+    },
+
+    "deviceCommands": {
+      "esp32": {
+        ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')",
+        ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')"
+      }
+    },
+
+    "unknown_scans": {
+      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')",
+      ".indexOn": ["timestamp"]
+    },
+
+    "devices": {
+      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin' || auth.uid === 'MdwxcdNtLgZp3cnYoqXBNkin8C82')"
+    },
+
+    "attendance": {
+      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
+    },
+
+    "students_attendance": {
+      ".read": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')",
+      ".write": "auth != null && (auth.uid === 'bi3c890VUXhVE0JFxroYfnlQwea2' || root.child('users').child(auth.uid).child('role').val() === 'admin')"
+    }
+  }
+}`;
+
 export const DEFAULT_FIREBASE_CONFIG: FirebaseConfigState = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || PROJECT_FIREBASE_API_KEY,
   authDomain: 'rfid-attendance-system-5fccd.firebaseapp.com',
@@ -153,6 +307,128 @@ export const DEFAULT_FIREBASE_CONFIG: FirebaseConfigState = {
 
 // In-memory cache of students fetched dynamically from Firebase RTDB (/students/{studentDbId})
 export const cachedStudentsMap: Record<string, Student> = {};
+
+// ============================================================================
+// NETWORK OPTIMIZATION, DEDUPLICATION, RETRY BACKOFF & CONCURRENCY HELPERS
+// ============================================================================
+
+const inFlightRequests = new Map<string, Promise<any>>();
+
+/**
+ * Deduplicates identical concurrent async requests so reconnects/re-renders never
+ * stampede Firebase Realtime Database with redundant downloads.
+ */
+export function dedupeInFlight<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const existing = inFlightRequests.get(key);
+  if (existing) {
+    return existing as Promise<T>;
+  }
+  const promise = Promise.resolve()
+    .then(fn)
+    .finally(() => {
+      inFlightRequests.delete(key);
+    });
+  inFlightRequests.set(key, promise);
+  return promise;
+}
+
+export function isTransientFirebaseError(err: any): boolean {
+  const code = String(err?.code || '').toLowerCase();
+  const msg = String(err?.message || '').toLowerCase();
+  if (
+    code.includes('permission') ||
+    code === 'unauthenticated' ||
+    code === 'unauthorized_uid' ||
+    /permission_denied|permission denied|unauthorized_uid|invalid|validation/i.test(msg)
+  ) {
+    return false;
+  }
+  return (
+    code.includes('network') ||
+    code.includes('unavailable') ||
+    code.includes('timeout') ||
+    code === 'disconnected' ||
+    /network|timed out|timeout|unavailable|offline|disconnected|econnreset|too_many/i.test(msg)
+  );
+}
+
+/**
+ * Exponential backoff retry wrapper strictly for transient network/timeout errors.
+ * Never retries PERMISSION_DENIED or validation errors.
+ */
+export async function withRetryBackoff<T>(
+  fn: () => Promise<T>,
+  options?: { maxRetries?: number; baseDelayMs?: number }
+): Promise<T> {
+  const maxRetries = options?.maxRetries ?? 3;
+  const baseDelayMs = options?.baseDelayMs ?? 180;
+  let lastErr: any;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      lastErr = err;
+      if (attempt >= maxRetries || !isTransientFirebaseError(err)) {
+        throw err;
+      }
+      const jitter = Math.floor(Math.random() * 80);
+      const delayMs = baseDelayMs * Math.pow(2, attempt) + jitter;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastErr;
+}
+
+/**
+ * Bounded concurrency worker pool for batched RTDB reads/writes without saturating sockets.
+ */
+export async function runWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  if (!items || items.length === 0) return [];
+  const results: R[] = new Array(items.length);
+  const workerCount = Math.max(1, Math.min(limit, items.length));
+  let cursor = 0;
+
+  const runners = Array.from({ length: workerCount }, async () => {
+    while (cursor < items.length) {
+      const idx = cursor++;
+      results[idx] = await worker(items[idx], idx);
+    }
+  });
+
+  await Promise.all(runners);
+  return results;
+}
+
+/**
+ * Splits a multi-location update object into safe chunks scoped cleanly inside a parent RTDB node.
+ */
+export async function updateInBatches(
+  db: Database,
+  basePath: string,
+  updatesMap: Record<string, any>,
+  chunkSize: number = 100
+): Promise<number> {
+  const entries = Object.entries(updatesMap);
+  if (entries.length === 0) return 0;
+
+  let written = 0;
+  for (let i = 0; i < entries.length; i += chunkSize) {
+    const chunkObj: Record<string, any> = {};
+    const slice = entries.slice(i, i + chunkSize);
+    for (const [k, v] of slice) {
+      chunkObj[k] = v === null ? null : stripUndefinedDeep(v);
+    }
+    const targetRef = ref(db, basePath);
+    await withRetryBackoff(() => update(targetRef, chunkObj));
+    written += slice.length;
+  }
+  return written;
+}
 
 /**
  * Typed Firebase Auth/Profile diagnostic error so UI distinguishes:
@@ -317,44 +593,7 @@ export async function resolveStudentByAnyId(
   const upper = raw.toUpperCase();
   const db = getFirebaseDatabase();
 
-  // 1. Check direct lookup in /students/{raw} or /students/{upper}
-  for (const candidate of Array.from(new Set([raw, upper]))) {
-    try {
-      const directSnap = await withTimeout(get(ref(db, `students/${candidate}`)), 3000, null);
-      if (directSnap && directSnap.exists && directSnap.exists()) {
-        const st = directSnap.val() as Student;
-        const rfidUID = (st.rfidUID || st.uid || candidate).trim().toUpperCase();
-        return {
-          studentDbId: candidate,
-          student: { ...st, studentDbId: candidate, rfidUID, uid: rfidUID },
-          rfidUID,
-        };
-      }
-    } catch {}
-  }
-
-  // 2. Query /rfid_to_student/{upper}
-  try {
-    const idxSnap = await withTimeout(get(ref(db, `rfid_to_student/${upper}`)), 3000, null);
-    if (idxSnap && idxSnap.exists && idxSnap.exists()) {
-      const mapping = idxSnap.val();
-      const targetDbId = typeof mapping === 'string' ? mapping : mapping?.studentDbId;
-      if (targetDbId) {
-        const stSnap = await withTimeout(get(ref(db, `students/${targetDbId}`)), 3000, null);
-        if (stSnap && stSnap.exists && stSnap.exists()) {
-          const st = stSnap.val() as Student;
-          const rfidUID = (st.rfidUID || st.uid || upper).trim().toUpperCase();
-          return {
-            studentDbId: targetDbId,
-            student: { ...st, studentDbId: targetDbId, rfidUID, uid: rfidUID },
-            rfidUID,
-          };
-        }
-      }
-    }
-  } catch {}
-
-  // 3. Fallback scan cached / lookup / live /students (for Admin operations)
+  // 1. Fastest path: check live in-memory lookup / cache before any network round-trip
   const sources = [studentsLookup, cachedStudentsMap].filter(Boolean) as Record<string, Student>[];
   for (const map of sources) {
     const matchedKey = resolveStudentDbIdFromMap(raw, map);
@@ -369,14 +608,55 @@ export async function resolveStudentByAnyId(
     }
   }
 
+  // 2. Direct path & /rfid_to_student index lookup in parallel
   try {
-    const allSnap = await withTimeout(get(ref(db, 'students')), 3500, null);
-    if (allSnap && allSnap.exists && allSnap.exists()) {
-      const allMap = allSnap.val() as Record<string, Student>;
-      const matchedKey = resolveStudentDbIdFromMap(raw, allMap);
-      if (matchedKey && allMap[matchedKey]) {
-        const st = allMap[matchedKey];
-        const rfidUID = (st.rfidUID || st.uid || matchedKey).trim().toUpperCase();
+    const [directRawSnap, directUpperSnap, idxSnap] = await Promise.all([
+      withTimeout(get(ref(db, `students/${raw}`)), 2500, null),
+      upper !== raw ? withTimeout(get(ref(db, `students/${upper}`)), 2500, null) : Promise.resolve(null),
+      withTimeout(get(ref(db, `rfid_to_student/${upper}`)), 2500, null),
+    ]);
+
+    const hit =
+      (directRawSnap && directRawSnap.exists && directRawSnap.exists() ? { id: raw, val: directRawSnap.val() } : null) ||
+      (directUpperSnap && directUpperSnap.exists && directUpperSnap.exists() ? { id: upper, val: directUpperSnap.val() } : null);
+
+    if (hit) {
+      const st = hit.val as Student;
+      const rfidUID = (st.rfidUID || st.uid || hit.id).trim().toUpperCase();
+      return {
+        studentDbId: hit.id,
+        student: { ...st, studentDbId: hit.id, rfidUID, uid: rfidUID },
+        rfidUID,
+      };
+    }
+
+    if (idxSnap && idxSnap.exists && idxSnap.exists()) {
+      const mapping = idxSnap.val();
+      const targetDbId = typeof mapping === 'string' ? mapping : mapping?.studentDbId;
+      if (targetDbId) {
+        const stSnap = await withTimeout(get(ref(db, `students/${targetDbId}`)), 2500, null);
+        if (stSnap && stSnap.exists && stSnap.exists()) {
+          const st = stSnap.val() as Student;
+          const rfidUID = (st.rfidUID || st.uid || upper).trim().toUpperCase();
+          return {
+            studentDbId: targetDbId,
+            student: { ...st, studentDbId: targetDbId, rfidUID, uid: rfidUID },
+            rfidUID,
+          };
+        }
+      }
+    }
+  } catch {}
+
+  // 3. Indexed RTDB query fallback on rfidUID / studentId (avoids downloading full /students tree)
+  try {
+    const qRfid = rtdbQuery(ref(db, 'students'), orderByChild('rfidUID'), equalTo(upper));
+    const rfidSnap = await withTimeout(get(qRfid), 2500, null);
+    if (rfidSnap && rfidSnap.exists && rfidSnap.exists()) {
+      const entries = Object.entries(rfidSnap.val() as Record<string, Student>);
+      if (entries.length > 0) {
+        const [matchedKey, st] = entries[0];
+        const rfidUID = (st.rfidUID || st.uid || upper).trim().toUpperCase();
         return {
           studentDbId: matchedKey,
           student: { ...st, studentDbId: matchedKey, rfidUID, uid: rfidUID },
@@ -492,46 +772,179 @@ export function subscribeToConnectionStatus(
 }
 
 // Student Realtime Database Operations
+export interface StudentSubscriptionDelta {
+  type: 'initial' | 'added' | 'changed' | 'removed';
+  studentDbId?: string;
+  student?: Student;
+}
+
+function normalizeStudentNode(dbKey: string, rawSt: any): Student {
+  const rfidUID = (rawSt.rfidUID || rawSt.uid || dbKey).toString().trim().toUpperCase();
+  return {
+    ...rawSt,
+    studentDbId: dbKey,
+    rfidUID,
+    uid: rfidUID,
+  };
+}
+
+/**
+ * High-speed incremental student subscription:
+ * 1. Hydrates once cleanly via get() (single initial render instead of N renders).
+ * 2. Uses Firebase child listeners (onChildAdded, onChildChanged, onChildRemoved) so
+ *    each RFID scan only normalizes & updates the ONE affected student record!
+ * 3. Preserves object identity for all unaffected students to avoid downstream re-renders.
+ */
 export function subscribeToStudents(
-  onSuccess: (students: Record<string, Student>) => void,
+  onSuccess: (students: Record<string, Student>, delta?: StudentSubscriptionDelta) => void,
   onError?: (err: Error) => void
 ) {
+  let isDisposed = false;
+  let hydrated = false;
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+  const localMap: Record<string, Student> = {};
+  const initialRawSignature = new Map<string, string>();
+  let unsubAdded: (() => void) | null = null;
+  let unsubChanged: (() => void) | null = null;
+  let unsubRemoved: (() => void) | null = null;
+
+  const syncCachedMap = (key: string, val?: Student) => {
+    if (val) cachedStudentsMap[key] = val;
+    else delete cachedStudentsMap[key];
+  };
+
   try {
     const db = getFirebaseDatabase();
     const studentsRef = ref(db, 'students');
-    const unsubscribe = onValue(
+
+    const scheduleInitialEmit = () => {
+      if (flushTimer) clearTimeout(flushTimer);
+      flushTimer = setTimeout(() => {
+        if (isDisposed || hydrated) return;
+        hydrated = true;
+        onSuccess({ ...localMap }, { type: 'initial' });
+      }, 24);
+    };
+
+    // Initial fast hydration via get()
+    get(studentsRef)
+      .then((snap) => {
+        if (isDisposed) return;
+        if (snap.exists()) {
+          const val = snap.val();
+          if (val && typeof val === 'object') {
+            Object.entries(val).forEach(([dbKey, rawSt]: [string, any]) => {
+              if (!rawSt || typeof rawSt !== 'object') return;
+              const norm = normalizeStudentNode(dbKey, rawSt);
+              localMap[dbKey] = norm;
+              syncCachedMap(dbKey, norm);
+              const attCount = norm.attendance ? Object.keys(norm.attendance).length : 0;
+              initialRawSignature.set(dbKey, `${norm.rfidUID}|${norm.status}|${attCount}|${norm.authUid || ''}`);
+            });
+          }
+        }
+        hydrated = true;
+        if (flushTimer) {
+          clearTimeout(flushTimer);
+          flushTimer = null;
+        }
+        Object.keys(cachedStudentsMap).forEach((k) => {
+          if (!localMap[k]) delete cachedStudentsMap[k];
+        });
+        onSuccess({ ...localMap }, { type: 'initial' });
+      })
+      .catch((error) => {
+        if (isDisposed) return;
+        console.warn('Realtime Database students initial read error:', error);
+        onError?.(error);
+      });
+
+    // Incremental child listeners: only affected student updates after initial hydration
+    unsubAdded = onChildAdded(
       studentsRef,
-      (snapshot: DataSnapshot) => {
-        const val = snapshot.val();
-        Object.keys(cachedStudentsMap).forEach((k) => delete cachedStudentsMap[k]);
-        if (val && typeof val === 'object') {
-          const normalized: Record<string, Student> = {};
-          Object.entries(val).forEach(([dbKey, rawSt]: [string, any]) => {
-            if (!rawSt || typeof rawSt !== 'object') return;
-            const studentDbId = (rawSt.studentDbId || dbKey).toString().trim();
-            const rfidUID = (rawSt.rfidUID || rawSt.uid || dbKey).toString().trim().toUpperCase();
-            const normStudent: Student = {
-              ...rawSt,
-              studentDbId: dbKey,
-              rfidUID,
-              uid: rfidUID,
-            };
-            cachedStudentsMap[dbKey] = normStudent;
-            normalized[dbKey] = normStudent;
-          });
-          onSuccess(normalized);
+      (snap: DataSnapshot) => {
+        if (isDisposed) return;
+        const dbKey = snap.key;
+        const rawSt = snap.val();
+        if (!dbKey || !rawSt || typeof rawSt !== 'object') return;
+        const norm = normalizeStudentNode(dbKey, rawSt);
+        const attCount = norm.attendance ? Object.keys(norm.attendance).length : 0;
+        const sig = `${norm.rfidUID}|${norm.status}|${attCount}|${norm.authUid || ''}`;
+
+        if (hydrated && localMap[dbKey] && initialRawSignature.get(dbKey) === sig) {
+          // Skip redundant replay during initial listener attachment
+          initialRawSignature.delete(dbKey);
+          return;
+        }
+        initialRawSignature.delete(dbKey);
+        localMap[dbKey] = norm;
+        syncCachedMap(dbKey, norm);
+
+        if (hydrated) {
+          onSuccess({ ...localMap }, { type: 'added', studentDbId: dbKey, student: norm });
         } else {
-          onSuccess({});
+          scheduleInitialEmit();
         }
       },
       (error) => {
-        console.warn('Realtime Database students read error:', error);
-        onError?.(error);
+        if (!isDisposed) {
+          console.warn('Realtime Database students child_added error:', error);
+          onError?.(error);
+        }
       }
     );
-    return () => off(studentsRef, 'value', unsubscribe);
-  } catch (error) {
-    console.error('Failed to subscribe to students', error);
+
+    unsubChanged = onChildChanged(
+      studentsRef,
+      (snap: DataSnapshot) => {
+        if (isDisposed) return;
+        const dbKey = snap.key;
+        const rawSt = snap.val();
+        if (!dbKey || !rawSt || typeof rawSt !== 'object') return;
+        const norm = normalizeStudentNode(dbKey, rawSt);
+        initialRawSignature.delete(dbKey);
+        localMap[dbKey] = norm;
+        syncCachedMap(dbKey, norm);
+        hydrated = true;
+        onSuccess({ ...localMap }, { type: 'changed', studentDbId: dbKey, student: norm });
+      },
+      (error) => {
+        if (!isDisposed) {
+          console.warn('Realtime Database students child_changed error:', error);
+          onError?.(error);
+        }
+      }
+    );
+
+    unsubRemoved = onChildRemoved(
+      studentsRef,
+      (snap: DataSnapshot) => {
+        if (isDisposed) return;
+        const dbKey = snap.key;
+        if (!dbKey) return;
+        initialRawSignature.delete(dbKey);
+        delete localMap[dbKey];
+        syncCachedMap(dbKey, undefined);
+        hydrated = true;
+        onSuccess({ ...localMap }, { type: 'removed', studentDbId: dbKey });
+      },
+      (error) => {
+        if (!isDisposed) {
+          console.warn('Realtime Database students child_removed error:', error);
+          onError?.(error);
+        }
+      }
+    );
+
+    return () => {
+      isDisposed = true;
+      if (flushTimer) clearTimeout(flushTimer);
+      try { if (unsubAdded) off(studentsRef, 'child_added', unsubAdded); } catch {}
+      try { if (unsubChanged) off(studentsRef, 'child_changed', unsubChanged); } catch {}
+      try { if (unsubRemoved) off(studentsRef, 'child_removed', unsubRemoved); } catch {}
+    };
+  } catch (error: any) {
+    console.warn('Failed to subscribe to students:', error?.message || error);
     onError?.(error as Error);
     return () => {};
   }
@@ -551,7 +964,6 @@ export async function saveStudent(student: Student): Promise<Student> {
   let existingAttendance: Record<string, AttendanceRecord> | undefined = undefined;
   let existingData: Student | null = null;
 
-  // Locate existing student record by studentDbId first, or by matching existing RFID
   if (!studentDbId) {
     const matched = resolveStudentDbIdFromMap(newRfid);
     if (matched) studentDbId = matched;
@@ -573,29 +985,31 @@ export async function saveStudent(student: Student): Promise<Student> {
     studentDbId = generateStudentDbId(student.studentId);
   }
 
-  // Enforce: Prevent duplicate active RFID card assignments across different students
-  try {
-    const idxSnap = await withTimeout(get(ref(db, `rfid_to_student/${newRfid}`)), 3000, null);
-    if (idxSnap && idxSnap.exists && idxSnap.exists()) {
-      const idxVal = idxSnap.val();
-      const assignedDbId = typeof idxVal === 'string' ? idxVal : idxVal?.studentDbId;
-      const isActiveIdx = typeof idxVal === 'string' ? true : idxVal?.active !== false;
-      if (assignedDbId && assignedDbId !== studentDbId && isActiveIdx) {
-        throw new Error(`RFID card ${newRfid} is already assigned to another student (${assignedDbId}). Unassign it before reassigning.`);
-      }
+  // Enforce duplicate RFID prevention via indexed lookup & in-memory map (zero full-tree downloads!)
+  const idxSnap = await withTimeout(get(ref(db, `rfid_to_student/${newRfid}`)), 2500, null);
+  if (idxSnap && idxSnap.exists && idxSnap.exists()) {
+    const idxVal = idxSnap.val();
+    const assignedDbId = typeof idxVal === 'string' ? idxVal : idxVal?.studentDbId;
+    const isActiveIdx = typeof idxVal === 'string' ? true : idxVal?.active !== false;
+    if (assignedDbId && assignedDbId !== studentDbId && isActiveIdx) {
+      throw new Error(`RFID card ${newRfid} is already assigned to another student (${assignedDbId}). Unassign it before reassigning.`);
     }
-  } catch (dupErr: any) {
-    if (dupErr?.message?.includes('already assigned')) throw dupErr;
+  }
+
+  for (const [k, other] of Object.entries(cachedStudentsMap)) {
+    if (!other || k === studentDbId) continue;
+    const otherRfid = (other.rfidUID || other.uid || k).trim().toUpperCase();
+    if (otherRfid === newRfid && other.status !== 'inactive') {
+      throw new Error(`RFID card ${newRfid} is already assigned to active student ${other.name} (${other.studentId}).`);
+    }
   }
 
   try {
-    const allSnap = await withTimeout(get(ref(db, 'students')), 3000, null);
-    if (allSnap && allSnap.exists && allSnap.exists()) {
-      const all = allSnap.val() as Record<string, Student>;
-      for (const [k, other] of Object.entries(all)) {
-        if (!other || k === studentDbId) continue;
-        const otherRfid = (other.rfidUID || other.uid || k).trim().toUpperCase();
-        if (otherRfid === newRfid && other.status !== 'inactive') {
+    const qRfid = rtdbQuery(ref(db, 'students'), orderByChild('rfidUID'), equalTo(newRfid));
+    const qSnap = await withTimeout(get(qRfid), 2500, null);
+    if (qSnap && qSnap.exists && qSnap.exists()) {
+      for (const [k, other] of Object.entries(qSnap.val() as Record<string, Student>)) {
+        if (other && k !== studentDbId && other.status !== 'inactive') {
           throw new Error(`RFID card ${newRfid} is already assigned to active student ${other.name} (${other.studentId}).`);
         }
       }
@@ -1314,28 +1728,40 @@ export async function registerStudentAccount(
   const db = getFirebaseDatabase();
   const fs = getFirebaseFirestore();
 
-  // Enforce duplicate prevention across /rfid_to_student and /students
-  const idxSnap = await get(ref(db, `rfid_to_student/${trimmedRfid}`));
-  if (idxSnap.exists()) {
+  // Enforce duplicate prevention via /rfid_to_student + cached map + indexed RTDB queries (zero full /students scan)
+  const [idxSnap, qRfidSnap, qRollSnap] = await Promise.all([
+    withTimeout(get(ref(db, `rfid_to_student/${trimmedRfid}`)), 2500, null),
+    withTimeout(get(rtdbQuery(ref(db, 'students'), orderByChild('rfidUID'), equalTo(trimmedRfid))), 2500, null).catch(() => null),
+    withTimeout(get(rtdbQuery(ref(db, 'students'), orderByChild('studentId'), equalTo(trimmedRoll))), 2500, null).catch(() => null),
+  ]);
+
+  if (idxSnap && idxSnap.exists && idxSnap.exists()) {
     const val = idxSnap.val();
     const isActiveIdx = typeof val === 'string' ? true : val?.active !== false;
     if (isActiveIdx) {
       throw new Error(`RFID Card UID ${trimmedRfid} is already registered to an existing student.`);
     }
   }
-
-  const allStudentsSnap = await get(ref(db, 'students'));
-  if (allStudentsSnap.exists()) {
-    const allStudents = allStudentsSnap.val() as Record<string, Student>;
-    for (const [k, st] of Object.entries(allStudents)) {
-      if (!st) continue;
-      const stRfid = (st.rfidUID || st.uid || k).trim().toUpperCase();
-      if (stRfid === trimmedRfid) {
-        throw new Error(`A student (${st.name}) is already registered with RFID Card UID: ${trimmedRfid}`);
-      }
-      if (st.studentId && st.studentId.trim().toUpperCase() === trimmedRoll.toUpperCase()) {
-        throw new Error(`A student (${st.name}) is already registered with Roll Number: ${trimmedRoll}`);
-      }
+  if (qRfidSnap && qRfidSnap.exists && qRfidSnap.exists()) {
+    const first = Object.values(qRfidSnap.val() as Record<string, Student>)[0];
+    if (first) {
+      throw new Error(`A student (${first.name}) is already registered with RFID Card UID: ${trimmedRfid}`);
+    }
+  }
+  if (qRollSnap && qRollSnap.exists && qRollSnap.exists()) {
+    const first = Object.values(qRollSnap.val() as Record<string, Student>)[0];
+    if (first) {
+      throw new Error(`A student (${first.name}) is already registered with Roll Number: ${trimmedRoll}`);
+    }
+  }
+  for (const [k, st] of Object.entries(cachedStudentsMap)) {
+    if (!st) continue;
+    const stRfid = (st.rfidUID || st.uid || k).trim().toUpperCase();
+    if (stRfid === trimmedRfid) {
+      throw new Error(`A student (${st.name}) is already registered with RFID Card UID: ${trimmedRfid}`);
+    }
+    if (st.studentId && st.studentId.trim().toUpperCase() === trimmedRoll.toUpperCase()) {
+      throw new Error(`A student (${st.name}) is already registered with Roll Number: ${trimmedRoll}`);
     }
   }
 
@@ -1602,85 +2028,90 @@ export async function verifyAdministratorAuth(): Promise<{
 export async function reconcileAllStudentMappings(
   studentsMapOverride?: Record<string, Student>
 ): Promise<{ linkedCount: number; ambiguousStudents: string[] }> {
-  const ambiguousStudents: string[] = [];
-  try {
-    const auth = getFirebaseAuth();
-    if (!auth.currentUser) {
-      return { linkedCount: 0, ambiguousStudents };
-    }
-    const adminAuthorized = await isUserAdmin(auth.currentUser.uid);
-    if (!adminAuthorized) {
-      return { linkedCount: 0, ambiguousStudents };
-    }
-
-    const db = getFirebaseDatabase();
-    const fs = getFirebaseFirestore();
-    let linkedCount = 0;
-
-    let studentsMap = studentsMapOverride;
-    if (!studentsMap) {
-      const sSnap = await withTimeout(get(ref(db, 'students')), 4000, null);
-      studentsMap = (sSnap && sSnap.exists && sSnap.exists() ? sSnap.val() : {}) as Record<string, Student>;
-    }
-
-    // Collect known user accounts dynamically from RTDB /users, /auth_to_student, /rfid_to_uid, and Firestore users
-    const userRecordsByAuthUid: Record<string, Partial<UserProfile>> = {};
-    const authToStudentMap: Record<string, any> = {};
-    const rfidToUidMap: Record<string, string> = {};
-
+  return dedupeInFlight('reconcileAllStudentMappings', async () => {
+    const ambiguousStudents: string[] = [];
     try {
-      const rtdbUsersSnap = await withTimeout(get(ref(db, 'users')), 3000, null);
-      if (rtdbUsersSnap && rtdbUsersSnap.exists && rtdbUsersSnap.exists()) {
-        const uVal = rtdbUsersSnap.val() as Record<string, Partial<UserProfile>>;
-        Object.entries(uVal || {}).forEach(([uid, u]) => {
-          if (u && uid !== CONFIGURED_ADMIN_UID && u.role !== 'admin') {
-            userRecordsByAuthUid[uid] = { ...u, uid };
-          }
-        });
+      const auth = getFirebaseAuth();
+      if (!auth.currentUser) {
+        return { linkedCount: 0, ambiguousStudents };
       }
-    } catch {}
-
-    try {
-      const a2sSnap = await withTimeout(get(ref(db, 'auth_to_student')), 3000, null);
-      if (a2sSnap && a2sSnap.exists && a2sSnap.exists()) {
-        const aVal = a2sSnap.val() as Record<string, any>;
-        Object.entries(aVal || {}).forEach(([uid, m]) => {
-          if (!m) return;
-          authToStudentMap[uid] = m;
-          if (uid !== CONFIGURED_ADMIN_UID) {
-            userRecordsByAuthUid[uid] = {
-              ...(userRecordsByAuthUid[uid] || {}),
-              uid,
-              studentDbId: userRecordsByAuthUid[uid]?.studentDbId || m.studentDbId,
-              rfidUID: userRecordsByAuthUid[uid]?.rfidUID || m.rfidUID,
-              rollNumber: userRecordsByAuthUid[uid]?.rollNumber || m.rollNumber,
-              email: userRecordsByAuthUid[uid]?.email || m.email,
-              role: 'student',
-            };
-          }
-        });
+      const adminAuthorized = await isUserAdmin(auth.currentUser.uid);
+      if (!adminAuthorized) {
+        return { linkedCount: 0, ambiguousStudents };
       }
-    } catch {}
 
-    try {
-      const r2uSnap = await withTimeout(get(ref(db, 'rfid_to_uid')), 2500, null);
-      if (r2uSnap && r2uSnap.exists && r2uSnap.exists()) {
-        const rVal = r2uSnap.val() as Record<string, any>;
-        Object.entries(rVal || {}).forEach(([rfid, val]) => {
-          const authUid = typeof val === 'string' ? val : val?.authUid;
-          if (authUid && typeof authUid === 'string') {
-            rfidToUidMap[rfid.trim().toUpperCase()] = authUid.trim();
-          }
-        });
-      }
-    } catch {}
+      const db = getFirebaseDatabase();
+      const fs = getFirebaseFirestore();
+      let linkedCount = 0;
 
-    try {
-      const fsSnap = await withTimeout(getDocs(collection(fs, 'users')), 3000, null);
+      // Parallel reads instead of 5 sequential round-trips
+      const [
+        studentsSnap,
+        rtdbUsersSnap,
+        a2sSnap,
+        r2uSnap,
+        r2sSnap,
+        fsSnap,
+      ] = await Promise.all([
+        studentsMapOverride ? Promise.resolve(null) : withTimeout(get(ref(db, 'students')), 4000, null),
+        withTimeout(get(ref(db, 'users')), 3000, null).catch(() => null),
+        withTimeout(get(ref(db, 'auth_to_student')), 3000, null).catch(() => null),
+        withTimeout(get(ref(db, 'rfid_to_uid')), 2500, null).catch(() => null),
+        withTimeout(get(ref(db, 'rfid_to_student')), 2500, null).catch(() => null),
+        withTimeout(getDocs(collection(fs, 'users')), 3000, null).catch(() => null),
+      ]);
+
+      const studentsMap =
+        studentsMapOverride ||
+        ((studentsSnap && studentsSnap.exists && studentsSnap.exists() ? studentsSnap.val() : {}) as Record<
+          string,
+          Student
+        >);
+
+      const rtdbUsersMap: Record<string, Partial<UserProfile>> =
+        rtdbUsersSnap && rtdbUsersSnap.exists && rtdbUsersSnap.exists() ? rtdbUsersSnap.val() || {} : {};
+      const authToStudentMap: Record<string, any> =
+        a2sSnap && a2sSnap.exists && a2sSnap.exists() ? a2sSnap.val() || {} : {};
+      const rfidToUidRaw: Record<string, any> =
+        r2uSnap && r2uSnap.exists && r2uSnap.exists() ? r2uSnap.val() || {} : {};
+      const rfidToStudentMap: Record<string, any> =
+        r2sSnap && r2sSnap.exists && r2sSnap.exists() ? r2sSnap.val() || {} : {};
+
+      const userRecordsByAuthUid: Record<string, Partial<UserProfile>> = {};
+      const rfidToUidMap: Record<string, string> = {};
+
+      Object.entries(rtdbUsersMap).forEach(([uid, u]) => {
+        if (u && uid !== CONFIGURED_ADMIN_UID && u.role !== 'admin') {
+          userRecordsByAuthUid[uid] = { ...u, uid };
+        }
+      });
+
+      Object.entries(authToStudentMap).forEach(([uid, m]) => {
+        if (!m || uid === CONFIGURED_ADMIN_UID) return;
+        userRecordsByAuthUid[uid] = {
+          ...(userRecordsByAuthUid[uid] || {}),
+          uid,
+          studentDbId: userRecordsByAuthUid[uid]?.studentDbId || m.studentDbId,
+          rfidUID: userRecordsByAuthUid[uid]?.rfidUID || m.rfidUID,
+          rollNumber: userRecordsByAuthUid[uid]?.rollNumber || m.rollNumber,
+          email: userRecordsByAuthUid[uid]?.email || m.email,
+          role: 'student',
+        };
+      });
+
+      Object.entries(rfidToUidRaw).forEach(([rfid, val]) => {
+        const authUid = typeof val === 'string' ? val : val?.authUid;
+        if (authUid && typeof authUid === 'string') {
+          rfidToUidMap[rfid.trim().toUpperCase()] = authUid.trim();
+        }
+      });
+
+      const fsUsersMap: Record<string, Partial<UserProfile>> = {};
       if (fsSnap && fsSnap.docs) {
         fsSnap.docs.forEach((d) => {
           const data = d.data() as Partial<UserProfile>;
           if (data && d.id !== CONFIGURED_ADMIN_UID && data.role !== 'admin') {
+            fsUsersMap[d.id] = data;
             userRecordsByAuthUid[d.id] = {
               ...(userRecordsByAuthUid[d.id] || {}),
               ...data,
@@ -1689,115 +2120,175 @@ export async function reconcileAllStudentMappings(
           }
         });
       }
-    } catch {}
 
-    const findMatchingAuthCandidates = (st: Student, dbKey: string, rfid: string): string[] => {
-      if (st.authUid && st.authUid.trim()) {
-        return [st.authUid.trim()];
-      }
-      const candidates = new Set<string>();
-      if (rfidToUidMap[rfid] && rfidToUidMap[rfid] !== CONFIGURED_ADMIN_UID) {
-        candidates.add(rfidToUidMap[rfid]);
-      }
-      const stEmail = (st.email || '').trim().toLowerCase();
-      const stRoll = (st.studentId || '').trim().toUpperCase();
-      for (const [authUid, u] of Object.entries(userRecordsByAuthUid)) {
-        if (!authUid || authUid === CONFIGURED_ADMIN_UID || u.role === 'admin') continue;
-        const uEmail = (u.email || '').trim().toLowerCase();
-        const uRoll = (u.rollNumber || '').trim().toUpperCase();
-        const uRfid = (u.rfidUID || '').trim().toUpperCase();
-        if (
-          (u.studentDbId && u.studentDbId === dbKey) ||
-          (uRfid && uRfid === rfid) ||
-          (stEmail && uEmail && stEmail === uEmail) ||
-          (stRoll && uRoll && stRoll === uRoll)
-        ) {
-          candidates.add(authUid);
+      const findMatchingAuthCandidates = (st: Student, dbKey: string, rfid: string): string[] => {
+        if (st.authUid && st.authUid.trim()) {
+          return [st.authUid.trim()];
+        }
+        const candidates = new Set<string>();
+        if (rfidToUidMap[rfid] && rfidToUidMap[rfid] !== CONFIGURED_ADMIN_UID) {
+          candidates.add(rfidToUidMap[rfid]);
+        }
+        const stEmail = (st.email || '').trim().toLowerCase();
+        const stRoll = (st.studentId || '').trim().toUpperCase();
+        for (const [authUid, u] of Object.entries(userRecordsByAuthUid)) {
+          if (!authUid || authUid === CONFIGURED_ADMIN_UID || u.role === 'admin') continue;
+          const uEmail = (u.email || '').trim().toLowerCase();
+          const uRoll = (u.rollNumber || '').trim().toUpperCase();
+          const uRfid = (u.rfidUID || '').trim().toUpperCase();
+          if (
+            (u.studentDbId && u.studentDbId === dbKey) ||
+            (uRfid && uRfid === rfid) ||
+            (stEmail && uEmail && stEmail === uEmail) ||
+            (stRoll && uRoll && stRoll === uRoll)
+          ) {
+            candidates.add(authUid);
+          }
+        }
+        return Array.from(candidates);
+      };
+
+      // Stage ONLY changed paths (diff-based multi-location batches; 0 writes when already synced)
+      const studentNodePatches: Record<string, any> = {};
+      const rfidToStudentPatches: Record<string, any> = {};
+      const usersPatches: Record<string, any> = {};
+      const authToStudentPatches: Record<string, any> = {};
+      const rfidToUidPatches: Record<string, any> = {};
+      const firestoreUpdates: Array<{ uid: string; payload: UserProfile }> = [];
+
+      const nowTs = Date.now();
+
+      for (const [dbKey, st] of Object.entries(studentsMap || {})) {
+        if (!st || typeof st !== 'object') continue;
+        const rfidUID = (st.rfidUID || st.uid || dbKey).trim().toUpperCase();
+        const candidates = findMatchingAuthCandidates(st, dbKey, rfidUID);
+
+        if (candidates.length > 1) {
+          ambiguousStudents.push(dbKey);
+        }
+
+        const resolvedAuthUid = candidates.length === 1 ? candidates[0] : (st.authUid || '').trim();
+
+        if (!st.studentDbId) studentNodePatches[`${dbKey}/studentDbId`] = dbKey;
+        if (!st.rfidUID && rfidUID) studentNodePatches[`${dbKey}/rfidUID`] = rfidUID;
+        if (!st.uid && rfidUID) studentNodePatches[`${dbKey}/uid`] = rfidUID;
+        if (resolvedAuthUid && !st.authUid) {
+          studentNodePatches[`${dbKey}/authUid`] = resolvedAuthUid;
+        }
+
+        const expectedActive = st.status !== 'inactive';
+        const existingR2S = rfidToStudentMap[rfidUID];
+        const r2sMatches =
+          existingR2S &&
+          typeof existingR2S === 'object' &&
+          existingR2S.studentDbId === dbKey &&
+          (existingR2S.authUid || '') === (resolvedAuthUid || '') &&
+          (existingR2S.rollNumber || '') === (st.studentId || '') &&
+          existingR2S.active === expectedActive;
+
+        if (!r2sMatches) {
+          rfidToStudentPatches[rfidUID] = stripUndefinedDeep({
+            rfidUID,
+            studentDbId: dbKey,
+            authUid: resolvedAuthUid || '',
+            rollNumber: st.studentId || '',
+            active: expectedActive,
+            updatedAt: nowTs,
+          });
+        }
+
+        if (resolvedAuthUid) {
+          const existingU = userRecordsByAuthUid[resolvedAuthUid] || {};
+          const resolvedEmail = (st.email || existingU.email || '').trim().toLowerCase();
+          const profilePayload: UserProfile = stripUndefinedDeep({
+            uid: resolvedAuthUid,
+            studentDbId: dbKey,
+            name: st.name || existingU.name || 'Student',
+            email: resolvedEmail,
+            rollNumber: st.studentId || existingU.rollNumber || '',
+            department: st.department || existingU.department || '',
+            year: st.year || existingU.year || '',
+            semester: st.semester || existingU.semester || 'Semester 1',
+            role: existingU.role === 'admin' ? 'admin' : 'student',
+            rfidUID,
+            phone: st.phone || existingU.phone || '',
+            createdAt: existingU.createdAt || nowTs,
+          });
+
+          const existingRtdbU = rtdbUsersMap[resolvedAuthUid];
+          const rtdbUserMatches =
+            existingRtdbU &&
+            existingRtdbU.studentDbId === profilePayload.studentDbId &&
+            existingRtdbU.rfidUID === profilePayload.rfidUID &&
+            existingRtdbU.role === profilePayload.role &&
+            existingRtdbU.name === profilePayload.name &&
+            existingRtdbU.email === profilePayload.email &&
+            existingRtdbU.rollNumber === profilePayload.rollNumber;
+
+          if (!rtdbUserMatches) {
+            usersPatches[resolvedAuthUid] = profilePayload;
+          }
+
+          const existingA2S = authToStudentMap[resolvedAuthUid];
+          const a2sMatches =
+            existingA2S &&
+            typeof existingA2S === 'object' &&
+            existingA2S.studentDbId === dbKey &&
+            existingA2S.rfidUID === rfidUID &&
+            (existingA2S.rollNumber || '') === (st.studentId || '') &&
+            (existingA2S.email || '') === resolvedEmail;
+
+          if (!a2sMatches) {
+            authToStudentPatches[resolvedAuthUid] = stripUndefinedDeep({
+              authUid: resolvedAuthUid,
+              studentDbId: dbKey,
+              rfidUID,
+              rollNumber: st.studentId || '',
+              email: resolvedEmail,
+              updatedAt: nowTs,
+            });
+          }
+
+          if (rfidToUidMap[rfidUID] !== resolvedAuthUid) {
+            rfidToUidPatches[`${rfidUID}/authUid`] = resolvedAuthUid;
+          }
+
+          const existingFsU = fsUsersMap[resolvedAuthUid];
+          const fsMatches =
+            existingFsU &&
+            existingFsU.studentDbId === profilePayload.studentDbId &&
+            existingFsU.rfidUID === profilePayload.rfidUID &&
+            existingFsU.role === profilePayload.role &&
+            existingFsU.email === profilePayload.email;
+
+          if (!fsMatches) {
+            firestoreUpdates.push({ uid: resolvedAuthUid, payload: profilePayload });
+          }
+
+          linkedCount++;
         }
       }
-      return Array.from(candidates);
-    };
 
-    for (const [dbKey, st] of Object.entries(studentsMap || {})) {
-      if (!st || typeof st !== 'object') continue;
-      const rfidUID = (st.rfidUID || st.uid || dbKey).trim().toUpperCase();
-      const candidates = findMatchingAuthCandidates(st, dbKey, rfidUID);
+      // Execute ONLY non-empty scoped multi-location batches in parallel
+      await Promise.all([
+        updateInBatches(db, 'students', studentNodePatches, 100).catch(() => 0),
+        updateInBatches(db, 'rfid_to_student', rfidToStudentPatches, 100).catch(() => 0),
+        updateInBatches(db, 'users', usersPatches, 100).catch(() => 0),
+        updateInBatches(db, 'auth_to_student', authToStudentPatches, 100).catch(() => 0),
+        updateInBatches(db, 'rfid_to_uid', rfidToUidPatches, 100).catch(() => 0),
+        firestoreUpdates.length > 0
+          ? runWithConcurrency(firestoreUpdates, 6, async ({ uid, payload }) => {
+              await withTimeout(setDoc(doc(fs, 'users', uid), payload, { merge: true }), 2000, null).catch(() => {});
+            })
+          : Promise.resolve([]),
+      ]);
 
-      if (candidates.length > 1) {
-        // Never guess when multiple Auth UIDs match the same student
-        ambiguousStudents.push(dbKey);
-      }
-
-      const resolvedAuthUid = candidates.length === 1 ? candidates[0] : (st.authUid || '').trim();
-
-      const studentUpdates: Record<string, any> = {};
-      if (!st.studentDbId) studentUpdates.studentDbId = dbKey;
-      if (!st.rfidUID && rfidUID) studentUpdates.rfidUID = rfidUID;
-      if (!st.uid && rfidUID) studentUpdates.uid = rfidUID;
-      if (resolvedAuthUid && !st.authUid) {
-        studentUpdates.authUid = resolvedAuthUid;
-      }
-
-      if (Object.keys(studentUpdates).length > 0) {
-        await update(ref(db, `students/${dbKey}`), stripUndefinedDeep(studentUpdates)).catch(() => {});
-      }
-
-      await update(
-        ref(db, `rfid_to_student/${rfidUID}`),
-        stripUndefinedDeep({
-          rfidUID,
-          studentDbId: dbKey,
-          authUid: resolvedAuthUid || '',
-          rollNumber: st.studentId || '',
-          active: st.status !== 'inactive',
-          updatedAt: Date.now(),
-        })
-      ).catch(() => {});
-
-      if (resolvedAuthUid) {
-        const existingU = userRecordsByAuthUid[resolvedAuthUid] || {};
-        const profilePayload: UserProfile = stripUndefinedDeep({
-          uid: resolvedAuthUid,
-          studentDbId: dbKey,
-          name: st.name || existingU.name || 'Student',
-          email: (st.email || existingU.email || '').trim().toLowerCase(),
-          rollNumber: st.studentId || existingU.rollNumber || '',
-          department: st.department || existingU.department || '',
-          year: st.year || existingU.year || '',
-          semester: st.semester || existingU.semester || 'Semester 1',
-          role: existingU.role === 'admin' ? 'admin' : 'student',
-          rfidUID,
-          phone: st.phone || existingU.phone || '',
-          createdAt: existingU.createdAt || Date.now(),
-        });
-
-        await update(ref(db, `users/${resolvedAuthUid}`), profilePayload).catch(() => {});
-        await set(
-          ref(db, `auth_to_student/${resolvedAuthUid}`),
-          stripUndefinedDeep({
-            authUid: resolvedAuthUid,
-            studentDbId: dbKey,
-            rfidUID,
-            rollNumber: st.studentId || '',
-            email: profilePayload.email,
-            updatedAt: Date.now(),
-          })
-        ).catch(() => {});
-        await update(ref(db, `rfid_to_uid/${rfidUID}`), { authUid: resolvedAuthUid }).catch(() => {});
-        await withTimeout(
-          setDoc(doc(fs, 'users', resolvedAuthUid), profilePayload, { merge: true }),
-          2000,
-          null
-        ).catch(() => {});
-        linkedCount++;
-      }
+      return { linkedCount, ambiguousStudents };
+    } catch (err) {
+      console.warn('Reconcile student mappings notice:', err);
+      return { linkedCount: 0, ambiguousStudents };
     }
-
-    return { linkedCount, ambiguousStudents };
-  } catch (err) {
-    console.warn('Reconcile student mappings notice:', err);
-    return { linkedCount: 0, ambiguousStudents };
-  }
+  });
 }
 
 /**
@@ -1923,6 +2414,34 @@ export async function getUserProfile(
     }
   }
 
+  // 2d. Fallback: check Firestore students collection where authUid == authUid
+  if (!authMapping && !rtdbProfile && !firestoreProfile) {
+    try {
+      const stuQuery = query(collection(fs, 'students'), where('authUid', '==', authUid));
+      const stuSnap = await withTimeoutReject(getDocs(stuQuery), 3500, 'Timed out querying Firestore students');
+      if (!stuSnap.empty) {
+        const firstDoc = stuSnap.docs[0];
+        const data = firstDoc.data() || {};
+        firestoreProfile = {
+          uid: authUid,
+          studentDbId: (data.studentDbId || firstDoc.id || '').toString().trim(),
+          email: data.email || normalizedEmail || '',
+          role: 'student',
+          name: data.name || '',
+          rollNumber: data.studentId || data.rollNumber || '',
+          rfidUID: (data.rfidUID || data.uid || '').toString().trim().toUpperCase(),
+          department: data.department || '',
+          year: data.year || '',
+          semester: data.semester || 'Semester 1',
+          phone: data.phone || '',
+          createdAt: Date.now(),
+        };
+      }
+    } catch {
+      // Non-fatal fallback
+    }
+  }
+
   // If no profile source returned data, prioritize Auth Expiration -> Permission Denied -> Network -> Missing Profile (null)
   const hasAnyProfile = Boolean(authMapping || rtdbProfile || firestoreProfile);
   if (!hasAnyProfile) {
@@ -1975,15 +2494,18 @@ export async function getUserProfile(
   }
 
   // 4. Student role: retrieve verified studentDbId and rfidUID
+  const mappedDbId = typeof authMapping === 'string' ? authMapping : authMapping?.studentDbId;
+  const mappedRfid = typeof authMapping === 'string' ? '' : authMapping?.rfidUID;
+
   let studentDbId = (
-    authMapping?.studentDbId ||
+    mappedDbId ||
     rtdbProfile?.studentDbId ||
     firestoreProfile?.studentDbId ||
     ''
   ).toString().trim();
 
   let rfidUID = (
-    authMapping?.rfidUID ||
+    mappedRfid ||
     rtdbProfile?.rfidUID ||
     firestoreProfile?.rfidUID ||
     ''
@@ -2824,16 +3346,17 @@ export async function logAuditActivity(
 }
 
 /**
- * Subscribe in real-time to audit logs
+ * Subscribe in real-time to bounded recent audit logs (indexed on timestamp)
  */
 export function subscribeToAuditLogs(
-  onUpdate: (logs: AuditActivityLog[]) => void
+  onUpdate: (logs: AuditActivityLog[]) => void,
+  limitCount: number = 200
 ): () => void {
   try {
     const db = getFirebaseDatabase();
-    const logsRef = ref(db, 'audit_logs');
+    const logsQuery = rtdbQuery(ref(db, 'audit_logs'), orderByChild('timestamp'), limitToLast(limitCount));
     const unsubscribe = onValue(
-      logsRef,
+      logsQuery,
       (snap) => {
         if (!snap.exists()) {
           onUpdate([]);
@@ -2845,23 +3368,24 @@ export function subscribeToAuditLogs(
       },
       (err) => console.warn('Audit logs listener notice:', err?.message)
     );
-    return () => off(logsRef, 'value', unsubscribe);
+    return () => off(logsQuery, 'value', unsubscribe);
   } catch {
     return () => {};
   }
 }
 
 /**
- * Subscribe in real-time to deleted/trash attendance records
+ * Subscribe in real-time to bounded recent deleted/trash attendance records (indexed on deletedAt)
  */
 export function subscribeToTrashRecords(
-  onUpdate: (records: TrashAttendanceRecord[]) => void
+  onUpdate: (records: TrashAttendanceRecord[]) => void,
+  limitCount: number = 200
 ): () => void {
   try {
     const db = getFirebaseDatabase();
-    const trashRef = ref(db, 'attendance_trash');
+    const trashQuery = rtdbQuery(ref(db, 'attendance_trash'), orderByChild('deletedAt'), limitToLast(limitCount));
     const unsubscribe = onValue(
-      trashRef,
+      trashQuery,
       (snap) => {
         if (!snap.exists()) {
           onUpdate([]);
@@ -2873,7 +3397,36 @@ export function subscribeToTrashRecords(
       },
       (err) => console.warn('Trash listener notice:', err?.message)
     );
-    return () => off(trashRef, 'value', unsubscribe);
+    return () => off(trashQuery, 'value', unsubscribe);
+  } catch {
+    return () => {};
+  }
+}
+
+/**
+ * Subscribe in real-time to bounded recent unknown RFID scans (indexed on timestamp)
+ */
+export function subscribeToUnknownScans(
+  onUpdate: (scans: AttendanceRecord[]) => void,
+  limitCount: number = 100
+): () => void {
+  try {
+    const db = getFirebaseDatabase();
+    const unknownQuery = rtdbQuery(ref(db, 'unknown_scans'), orderByChild('timestamp'), limitToLast(limitCount));
+    const unsubscribe = onValue(
+      unknownQuery,
+      (snap) => {
+        if (!snap.exists()) {
+          onUpdate([]);
+          return;
+        }
+        const val = snap.val() as Record<string, AttendanceRecord>;
+        const list = Object.values(val).sort((a, b) => b.timestamp - a.timestamp);
+        onUpdate(list);
+      },
+      () => {}
+    );
+    return () => off(unknownQuery, 'value', unsubscribe);
   } catch {
     return () => {};
   }
@@ -3113,8 +3666,11 @@ export async function bulkDeleteAttendance(
 ): Promise<{ success: boolean; count: number; deletedRecords: AttendanceRecord[] }> {
   const db = getFirebaseDatabase();
   const deletedRecords: AttendanceRecord[] = [];
+  const trashPatches: Record<string, any> = {};
+  const studentNullPatches: Record<string, null> = {};
+  const nowTs = Date.now();
 
-  for (const r of records) {
+  await runWithConcurrency(records, 12, async (r) => {
     const resolved = await resolveStudentByAnyId(r.studentDbId || r.uid);
     const studentDbId = resolved?.studentDbId || (r.studentDbId || r.uid).trim();
     const cardUid = (resolved?.rfidUID || r.uid).trim().toUpperCase();
@@ -3131,21 +3687,27 @@ export async function bulkDeleteAttendance(
           uid: resolvedCardUid,
           rfidUID: resolvedCardUid,
           trashId,
-          deletedAt: Date.now(),
+          deletedAt: nowTs,
           deletedBy: adminUser.email || 'admin',
           deleteReason: reason || 'Bulk deletion by administrator',
           originalPath: `students/${studentDbId}/attendance/${r.date}`,
           isDeleted: true,
         });
 
-        await set(ref(db, `attendance_trash/${trashId}`), trashEntry);
-        await remove(targetRef);
-
+        trashPatches[trashId] = trashEntry;
+        studentNullPatches[`${studentDbId}/attendance/${r.date}`] = null;
         deletedRecords.push({ ...existing, studentDbId });
       }
     } catch (err) {
-      console.warn(`Failed deleting record students/${studentDbId}/attendance/${r.date}:`, err);
+      console.warn(`Failed preparing bulk delete for students/${studentDbId}/attendance/${r.date}:`, err);
     }
+  });
+
+  if (Object.keys(trashPatches).length > 0) {
+    await updateInBatches(db, 'attendance_trash', trashPatches, 100);
+  }
+  if (Object.keys(studentNullPatches).length > 0) {
+    await updateInBatches(db, 'students', studentNullPatches, 100);
   }
 
   await logAuditActivity('BULK_DELETE', adminUser, {
@@ -3158,8 +3720,201 @@ export async function bulkDeleteAttendance(
   return { success: true, count: deletedRecords.length, deletedRecords };
 }
 
+export interface DateAttendanceMatch {
+  studentDbId: string;
+  attendanceKey: string;
+  record: AttendanceRecord;
+}
+
 /**
- * Bulk update attendance status for multiple records.
+ * Pure helper to collect all active attendance records across students for a given target date.
+ * Handles canonical YYYY-MM-DD keys as well as alternate date formats normalized in IST.
+ */
+export function collectAttendanceRecordsForDate(
+  studentsMap: Record<string, Student>,
+  targetDateInput: string
+): DateAttendanceMatch[] {
+  const normalizedTarget = normalizeToISODate(targetDateInput);
+  if (!normalizedTarget || !studentsMap) return [];
+
+  const matches: DateAttendanceMatch[] = [];
+  Object.entries(studentsMap).forEach(([dbKey, st]) => {
+    if (!st || !st.attendance) return;
+    const studentDbId = (st.studentDbId || dbKey).trim();
+    const cardUid = (st.rfidUID || st.uid || dbKey).trim().toUpperCase();
+
+    Object.entries(st.attendance).forEach(([attKey, rawRec]) => {
+      if (!rawRec || rawRec.isDeleted) return;
+      const keyDate = normalizeToISODate(attKey);
+      const recDate = normalizeToISODate(rawRec.date);
+      if (keyDate === normalizedTarget || recDate === normalizedTarget) {
+        matches.push({
+          studentDbId,
+          attendanceKey: attKey,
+          record: {
+            ...rawRec,
+            studentDbId,
+            uid: (rawRec.rfidUID || rawRec.uid || cardUid).toString().trim().toUpperCase(),
+            rfidUID: (rawRec.rfidUID || rawRec.uid || cardUid).toString().trim().toUpperCase(),
+            studentName: rawRec.studentName || st.name,
+            studentId: rawRec.studentId || st.studentId,
+            department: rawRec.department || st.department,
+            date: normalizedTarget,
+          },
+        });
+      }
+    });
+  });
+
+  return matches.sort((a, b) => (b.record.timestamp || 0) - (a.record.timestamp || 0));
+}
+
+/**
+ * Permanently delete all attendance records for a specific calendar date across all students.
+ * Uses scoped multi-location batch updates under /students & /attendance_trash so even 1,000+
+ * students delete in milliseconds rather than 1,000 sequential round-trips.
+ */
+export async function deleteAttendanceByDate(
+  dateInput: string,
+  adminUser: { email?: string | null; uid?: string },
+  reason: string = 'Permanent date-based attendance deletion'
+): Promise<{
+  success: boolean;
+  date: string;
+  deletedCount: number;
+  deletedRecords: AttendanceRecord[];
+}> {
+  const verifiedAdmin = await verifyAdministratorAuth();
+  if (adminUser.uid && verifiedAdmin.uid !== adminUser.uid && verifiedAdmin.uid !== CONFIGURED_ADMIN_UID) {
+    throw new Error('Unauthorized: Authenticated user does not match administrator session.');
+  }
+
+  const normalizedDate = normalizeToISODate(dateInput);
+  if (!normalizedDate) {
+    throw new Error(`Invalid attendance date "${dateInput}". Expected a valid calendar date.`);
+  }
+
+  const db = getFirebaseDatabase();
+  const studentsSnap = await runRtdbOp('GET', '/students', () => get(ref(db, 'students')));
+  const liveStudentsMap = (studentsSnap.exists() ? studentsSnap.val() : {}) as Record<string, Student>;
+
+  const targetsToRemove: Array<{ studentDbId: string; attendanceKey: string; record: AttendanceRecord }> = [];
+  Object.entries(liveStudentsMap).forEach(([dbKey, st]) => {
+    if (!st || !st.attendance) return;
+    const cardUid = (st.rfidUID || st.uid || dbKey).trim().toUpperCase();
+    Object.entries(st.attendance).forEach(([attKey, rawRec]) => {
+      if (!rawRec) return;
+      const keyDate = normalizeToISODate(attKey);
+      const recDate = normalizeToISODate(rawRec.date);
+      if (attKey === normalizedDate || keyDate === normalizedDate || recDate === normalizedDate) {
+        targetsToRemove.push({
+          studentDbId: dbKey,
+          attendanceKey: attKey,
+          record: {
+            ...rawRec,
+            studentDbId: dbKey,
+            uid: (rawRec.rfidUID || rawRec.uid || cardUid).toString().trim().toUpperCase(),
+            rfidUID: (rawRec.rfidUID || rawRec.uid || cardUid).toString().trim().toUpperCase(),
+            studentName: rawRec.studentName || st.name,
+            studentId: rawRec.studentId || st.studentId,
+            department: rawRec.department || st.department,
+            date: normalizedDate,
+          },
+        });
+      }
+    });
+  });
+
+  const deletedRecords: AttendanceRecord[] = [];
+  const studentRemovalPatches: Record<string, null> = {};
+  for (const item of targetsToRemove) {
+    studentRemovalPatches[`${item.studentDbId}/attendance/${item.attendanceKey}`] = null;
+    if (cachedStudentsMap[item.studentDbId]?.attendance) {
+      delete cachedStudentsMap[item.studentDbId].attendance![item.attendanceKey];
+    }
+    if (!item.record.isDeleted) {
+      deletedRecords.push(item.record);
+    }
+  }
+
+  if (Object.keys(studentRemovalPatches).length > 0) {
+    await runRtdbOp('UPDATE (Batch Remove)', '/students', () =>
+      updateInBatches(db, 'students', studentRemovalPatches, 100)
+    );
+  }
+
+  // Batched cleanup for attendance_trash, working_days, and legacy /attendance in parallel
+  let trashCleanedCount = 0;
+  await Promise.all([
+    (async () => {
+      try {
+        const trashSnap = await get(ref(db, 'attendance_trash'));
+        if (trashSnap.exists()) {
+          const trashMap = trashSnap.val() as Record<string, TrashAttendanceRecord>;
+          const trashNullPatches: Record<string, null> = {};
+          for (const [trashKey, trashItem] of Object.entries(trashMap)) {
+            const trashDate = normalizeToISODate(trashItem?.date);
+            if (trashDate === normalizedDate || trashKey.startsWith(`${normalizedDate}_`)) {
+              trashNullPatches[trashKey] = null;
+              trashCleanedCount++;
+            }
+          }
+          if (Object.keys(trashNullPatches).length > 0) {
+            await updateInBatches(db, 'attendance_trash', trashNullPatches, 100);
+          }
+        }
+      } catch (err) {
+        console.warn(`Non-fatal notice cleaning attendance_trash for ${normalizedDate}:`, err);
+      }
+    })(),
+    (async () => {
+      try {
+        const wdRef = ref(db, `working_days/${normalizedDate}`);
+        const wdSnap = await get(wdRef);
+        if (wdSnap.exists() && !wdSnap.val()?.isHoliday) {
+          await remove(wdRef);
+        }
+      } catch (err) {
+        console.warn(`Non-fatal notice cleaning working_days/${normalizedDate}:`, err);
+      }
+    })(),
+    (async () => {
+      try {
+        const legacyRef = ref(db, `attendance/${normalizedDate}`);
+        const legacySnap = await get(legacyRef);
+        if (legacySnap.exists()) {
+          await remove(legacyRef);
+        }
+      } catch {}
+    })(),
+  ]);
+
+  await logAuditActivity('DELETE_ATTENDANCE_BY_DATE', { email: verifiedAdmin.email || adminUser.email, uid: verifiedAdmin.uid }, {
+    date: normalizedDate,
+    reason: reason.trim() || 'Permanent date-based attendance deletion',
+    affectedCount: deletedRecords.length,
+    details: `Permanently deleted ${deletedRecords.length} attendance record(s) for ${normalizedDate} (${trashCleanedCount} trash archive entries cleared)`,
+    previousValues: deletedRecords.map((d) => ({
+      studentDbId: d.studentDbId,
+      uid: d.uid,
+      name: d.studentName,
+      status: d.status,
+      time: d.time,
+      date: d.date,
+    })),
+    updatedValues: null,
+  });
+
+  return {
+    success: true,
+    date: normalizedDate,
+    deletedCount: deletedRecords.length,
+    deletedRecords,
+  };
+}
+
+/**
+ * Bulk update attendance status for multiple records using batched multi-location updates.
  */
 export async function bulkUpdateAttendanceStatus(
   records: Array<{ date: string; uid: string; studentDbId?: string; studentName?: string }>,
@@ -3169,8 +3924,10 @@ export async function bulkUpdateAttendanceStatus(
 ): Promise<{ success: boolean; count: number; previousStates: Array<{ date: string; uid: string; studentDbId: string; prevStatus: AttendanceStatus }> }> {
   const db = getFirebaseDatabase();
   const previousStates: Array<{ date: string; uid: string; studentDbId: string; prevStatus: AttendanceStatus }> = [];
+  const studentPatches: Record<string, any> = {};
+  const nowTs = Date.now();
 
-  for (const r of records) {
+  await runWithConcurrency(records, 12, async (r) => {
     const resolved = await resolveStudentByAnyId(r.studentDbId || r.uid);
     const studentDbId = resolved?.studentDbId || (r.studentDbId || r.uid).trim();
     const cardUid = (resolved?.rfidUID || r.uid).trim().toUpperCase();
@@ -3184,7 +3941,7 @@ export async function bulkUpdateAttendanceStatus(
 
         const prevEdits = existing.previousEdits || [];
         prevEdits.unshift({
-          editedAt: Date.now(),
+          editedAt: nowTs,
           editedBy: adminUser.email || 'admin',
           reason: reason || `Bulk status changed to ${newStatus}`,
           prevData: {
@@ -3205,15 +3962,19 @@ export async function bulkUpdateAttendanceStatus(
           status: newStatus,
           source: 'admin_edit',
           lastModifiedBy: adminUser.email || 'admin',
-          lastModifiedAt: Date.now(),
+          lastModifiedAt: nowTs,
           previousEdits: prevEdits,
         });
 
-        await set(targetRef, updated);
+        studentPatches[`${studentDbId}/attendance/${r.date}`] = updated;
       }
     } catch (err) {
-      console.warn(`Failed bulk updating students/${studentDbId}/attendance/${r.date}:`, err);
+      console.warn(`Failed preparing bulk update for students/${studentDbId}/attendance/${r.date}:`, err);
     }
+  });
+
+  if (Object.keys(studentPatches).length > 0) {
+    await updateInBatches(db, 'students', studentPatches, 100);
   }
 
   await logAuditActivity('BULK_STATUS_CHANGE', adminUser, {
@@ -3905,40 +4666,49 @@ export async function inspectLegacyDatabase(): Promise<MigrationInspection> {
 
 /**
  * Real-time listener on legacy /attendance/{DATE}/{UID} so admin detects pending or newly uploaded
- * legacy records immediately and triggers automatic verified migration without manual intervention.
+ * legacy records immediately and triggers automatic background batched migration.
+ * Skips heavy key sorting while active migration is running.
  */
 export function subscribeToLegacyAttendanceChanges(
   onDetected: (info: { hasLegacy: boolean; recordCount: number; signature: string }) => void,
   onError?: (err: Error) => void
 ): () => void {
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   try {
     const db = getFirebaseDatabase();
     const attRef = ref(db, 'attendance');
     const unsubscribe = onValue(
       attRef,
       (snap) => {
-        if (!snap.exists()) {
-          onDetected({ hasLegacy: false, recordCount: 0, signature: '' });
-          return;
-        }
-        const val = snap.val() as Record<string, Record<string, any>>;
-        const keys: string[] = [];
-        let recordCount = 0;
-        Object.entries(val || {}).forEach(([dateKey, dayMap]) => {
-          if (!dayMap || typeof dayMap !== 'object') return;
-          Object.entries(dayMap).forEach(([uidKey, rawRec]) => {
-            if (!rawRec || typeof rawRec !== 'object') return;
-            recordCount++;
-            const normUid = normalizeRfidKey((rawRec as any).rfidUID || (rawRec as any).uid || uidKey);
-            keys.push(`${dateKey}::${normUid}::${(rawRec as any).timestamp || ''}`);
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+          if (!snap.exists()) {
+            onDetected({ hasLegacy: false, recordCount: 0, signature: '' });
+            return;
+          }
+          const val = snap.val() as Record<string, Record<string, any>>;
+          let recordCount = 0;
+          let minKey = '';
+          let maxKey = '';
+          let latestTs = 0;
+          Object.entries(val || {}).forEach(([dateKey, dayMap]) => {
+            if (!dayMap || typeof dayMap !== 'object') return;
+            Object.entries(dayMap).forEach(([uidKey, rawRec]) => {
+              if (!rawRec || typeof rawRec !== 'object') return;
+              recordCount++;
+              const k = `${dateKey}:${uidKey}`;
+              if (!minKey || k < minKey) minKey = k;
+              if (!maxKey || k > maxKey) maxKey = k;
+              const ts = Number((rawRec as any).timestamp || 0);
+              if (ts > latestTs) latestTs = ts;
+            });
           });
-        });
-        keys.sort();
-        onDetected({
-          hasLegacy: recordCount > 0,
-          recordCount,
-          signature: `${recordCount}|${keys.join(',')}`,
-        });
+          onDetected({
+            hasLegacy: recordCount > 0,
+            recordCount,
+            signature: recordCount > 0 ? `${recordCount}|${minKey}|${maxKey}|${latestTs}` : '',
+          });
+        }, 120);
       },
       (err) => {
         console.warn('Legacy /attendance listener error:', err?.message);
@@ -3952,7 +4722,10 @@ export function subscribeToLegacyAttendanceChanges(
         );
       }
     );
-    return () => off(attRef, 'value', unsubscribe);
+    return () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      off(attRef, 'value', unsubscribe);
+    };
   } catch (err: any) {
     onError?.(err);
     return () => {};
@@ -3998,7 +4771,28 @@ export async function exportCompleteDatabaseBackup(
     }
   };
 
-  const studentsAttendanceVal = await safeGet('students_attendance');
+  const [
+    studentsAttendanceVal,
+    workingDaysVal,
+    settingsVal,
+    suspensionsVal,
+    trashVal,
+    auditVal,
+    recoveryVal,
+    usersVal,
+    rfidToUidVal,
+  ] = await Promise.all([
+    safeGet('students_attendance'),
+    safeGet('working_days'),
+    safeGet('settings'),
+    safeGet('suspensions'),
+    safeGet('attendance_trash'),
+    safeGet('audit_logs'),
+    safeGet('migration_recovery'),
+    safeGet('users'),
+    safeGet('rfid_to_uid'),
+  ]);
+
   const expectedRecordCount = countLegacyAttendanceRecords(attendanceVal, studentsAttendanceVal);
 
   const backupPayload = stripUndefinedDeep({
@@ -4012,14 +4806,14 @@ export async function exportCompleteDatabaseBackup(
       students: studentsVal,
       attendance: attendanceVal,
       students_attendance: studentsAttendanceVal,
-      working_days: await safeGet('working_days'),
-      settings: await safeGet('settings'),
-      suspensions: await safeGet('suspensions'),
-      attendance_trash: await safeGet('attendance_trash'),
-      audit_logs: await safeGet('audit_logs'),
-      migration_recovery: await safeGet('migration_recovery'),
-      users: await safeGet('users'),
-      rfid_to_uid: await safeGet('rfid_to_uid'),
+      working_days: workingDaysVal,
+      settings: settingsVal,
+      suspensions: suspensionsVal,
+      attendance_trash: trashVal,
+      audit_logs: auditVal,
+      migration_recovery: recoveryVal,
+      users: usersVal,
+      rfid_to_uid: rfidToUidVal,
     },
   });
 
@@ -4072,36 +4866,165 @@ export async function exportCompleteDatabaseBackup(
   };
 }
 
-/**
- * Safely migrate legacy /attendance & /students_attendance into unified /students/{RFID_UID}/attendance/{DATE}.
- * 1. Verifies Firebase Auth & Administrator UID (bi3c890VUXhVE0JFxroYfnlQwea2).
- * 2. Reads all legacy attendance records & creates verified backup under /backups.
- * 3. Verifies backup contains all legacy records before touching /students.
- * 4. Writes records strictly to /students/{UID}/attendance/{DATE} without unauthorized root writes.
- * 5. Verifies every migrated record via read-back parity checks.
- * 6. Preserves /attendance until 100% verification passes.
- */
+// ============================================================================
+// ULTRA-FAST INCREMENTAL, CHECKPOINTED, BATCHED & PAUSABLE MIGRATION ENGINE
+// ============================================================================
+
+export const DEFAULT_MIGRATION_BATCH_SIZE = 100;
+const MIGRATION_CHECKPOINT_PATH = 'migration_status/unified_students_v1';
+
 let activeMigrationPromise: Promise<MigrationResult> | null = null;
+const migrationControl = {
+  pauseRequested: false,
+};
+
+export function pauseDatabaseMigration(): void {
+  migrationControl.pauseRequested = true;
+}
+
+export function isMigrationPausedRequested(): boolean {
+  return migrationControl.pauseRequested;
+}
+
+export async function getMigrationCheckpoint(): Promise<MigrationCheckpoint | null> {
+  try {
+    const db = getFirebaseDatabase();
+    const snap = await withTimeout(get(ref(db, MIGRATION_CHECKPOINT_PATH)), 2500, null);
+    if (snap && snap.exists && snap.exists()) {
+      return snap.val() as MigrationCheckpoint;
+    }
+  } catch {}
+  return null;
+}
+
+export async function clearMigrationCheckpoint(): Promise<void> {
+  try {
+    const db = getFirebaseDatabase();
+    await remove(ref(db, MIGRATION_CHECKPOINT_PATH));
+  } catch {}
+}
+
+/**
+ * Pure incremental attendance record comparator: returns true when target already holds
+ * an identical or newer/protected record so migration can skip writing & verifying it.
+ */
+export function isTargetAttendanceAlreadyUpToDate(existingAtTarget: any, candidateRec: AttendanceRecord): boolean {
+  if (!existingAtTarget || typeof existingAtTarget !== 'object') return false;
+  if (existingAtTarget.isOverridden || existingAtTarget.lastModifiedAt || existingAtTarget.isDeleted) {
+    return true;
+  }
+  const existingTs = toEpochMs(existingAtTarget.timestamp, existingAtTarget.date, existingAtTarget.time);
+  const incomingTs = toEpochMs(candidateRec.timestamp, candidateRec.date, candidateRec.time);
+  const existingUid = normalizeRfidKey(existingAtTarget.rfidUID || existingAtTarget.uid || '');
+  const candidateUid = normalizeRfidKey(candidateRec.rfidUID || candidateRec.uid || '');
+  if (
+    existingTs >= incomingTs &&
+    existingTs > 0 &&
+    existingAtTarget.date === candidateRec.date &&
+    existingAtTarget.status === candidateRec.status &&
+    (!candidateUid || existingUid === candidateUid)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+export interface MigrationExecutionOptions {
+  batchSize?: number;
+  resume?: boolean;
+  retryFailedOnly?: boolean;
+  onProgress?: (progress: MigrationProgress) => void;
+}
 
 export async function runUnifiedDatabaseMigration(
-  adminUser: { email?: string | null; uid?: string }
+  adminUser: { email?: string | null; uid?: string },
+  options?: MigrationExecutionOptions
 ): Promise<MigrationResult> {
   if (activeMigrationPromise) {
     return activeMigrationPromise;
   }
 
-  activeMigrationPromise = executeUnifiedDatabaseMigrationInternal(adminUser).finally(() => {
+  migrationControl.pauseRequested = false;
+  activeMigrationPromise = executeUnifiedDatabaseMigrationInternal(adminUser, options).finally(() => {
     activeMigrationPromise = null;
   });
   return activeMigrationPromise;
 }
 
+export async function retryFailedMigrationRecords(
+  adminUser: { email?: string | null; uid?: string },
+  options?: Omit<MigrationExecutionOptions, 'retryFailedOnly'>
+): Promise<MigrationResult> {
+  return runUnifiedDatabaseMigration(adminUser, {
+    ...options,
+    resume: true,
+    retryFailedOnly: true,
+  });
+}
+
 async function executeUnifiedDatabaseMigrationInternal(
-  adminUser: { email?: string | null; uid?: string }
+  adminUser: { email?: string | null; uid?: string },
+  options?: MigrationExecutionOptions
 ): Promise<MigrationResult> {
   const db = getFirebaseDatabase();
+  const startedAt = Date.now();
+  const configuredBatchSize = Math.max(10, Math.min(250, options?.batchSize || DEFAULT_MIGRATION_BATCH_SIZE));
   const errors: string[] = [];
   const recordLogs: MigrationRecordLog[] = [];
+  const MAX_UI_LOGS = 250;
+
+  const pushLog = (entry: MigrationRecordLog) => {
+    recordLogs.push(entry);
+    if (recordLogs.length > MAX_UI_LOGS) {
+      recordLogs.shift();
+    }
+  };
+
+  let lastProgress: MigrationProgress = {
+    status: 'running',
+    phase: 'authenticating',
+    totalLegacy: 0,
+    alreadyMigrated: 0,
+    pending: 0,
+    succeeded: 0,
+    failed: 0,
+    unregistered: 0,
+    currentBatch: 0,
+    totalBatches: 0,
+    batchSize: configuredBatchSize,
+    progressPercent: 0,
+    recordsPerSec: 0,
+    durationMs: 0,
+    verificationStatus: 'pending',
+    message: 'Verifying Administrator Firebase Authentication...',
+    logs: [],
+  };
+
+  const emitProgress = (patch: Partial<MigrationProgress>) => {
+    const durationMs = Math.max(1, Date.now() - startedAt);
+    const done =
+      (patch.alreadyMigrated ?? lastProgress.alreadyMigrated) +
+      (patch.succeeded ?? lastProgress.succeeded) +
+      (patch.unregistered ?? lastProgress.unregistered);
+    const total = patch.totalLegacy ?? lastProgress.totalLegacy;
+    const processedInSession =
+      (patch.succeeded ?? lastProgress.succeeded) + (patch.unregistered ?? lastProgress.unregistered);
+    const recordsPerSec = Number(((processedInSession / durationMs) * 1000).toFixed(1));
+    const progressPercent =
+      total > 0 ? Math.min(100, Math.round((done / total) * 100)) : patch.status === 'completed' ? 100 : 0;
+
+    lastProgress = {
+      ...lastProgress,
+      ...patch,
+      durationMs,
+      recordsPerSec,
+      progressPercent,
+      logs: [...recordLogs],
+    };
+    options?.onProgress?.(lastProgress);
+  };
+
+  emitProgress({ phase: 'authenticating' });
 
   // 1. Verify Firebase Authentication and Administrator UID match
   let verifiedAdmin: { uid: string; email: string | null; tokenVerified: boolean };
@@ -4110,6 +5033,7 @@ async function executeUnifiedDatabaseMigrationInternal(
   } catch (authErr: any) {
     const opErr = authErr instanceof RtdbOperationError ? authErr : null;
     const msg = authErr?.message || 'Administrator authentication verification failed.';
+    emitProgress({ status: 'error', phase: 'error', verificationStatus: 'failed', message: msg });
     return {
       success: false,
       message: `Migration aborted: ${msg}`,
@@ -4117,143 +5041,70 @@ async function executeUnifiedDatabaseMigrationInternal(
       skippedDuplicateCount: 0,
       unregisteredCount: 0,
       verifiedCount: 0,
+      failedCount: 0,
       totalLegacyCount: 0,
       legacyRemoved: false,
+      durationMs: Date.now() - startedAt,
+      errors: [msg],
       failedOperation: opErr?.operation || 'AUTH_CHECK',
       failedPath: opErr?.path || '/auth/currentUser',
-      errors: [msg],
       recordLogs,
     };
   }
 
-  // 2. Mandatory pre-migration backup under /backups + read-back verification
-  let backupPath = '';
-  let rawBackupPath = '';
-  let backupVerifiedCount = 0;
-  let backupExpectedCount = 0;
-  try {
-    const backup = await exportCompleteDatabaseBackup({
-      email: verifiedAdmin.email || adminUser?.email,
-      uid: verifiedAdmin.uid,
-    });
-    backupPath = backup.backupPath;
-    rawBackupPath = backup.rawBackupPath;
-    backupVerifiedCount = backup.verifiedRecordCount;
-    backupExpectedCount = backup.expectedRecordCount;
-  } catch (err: any) {
-    const opErr = err instanceof RtdbOperationError ? err : null;
-    const msg = err?.message || 'Backup write failed';
-    return {
-      success: false,
-      message: `Migration aborted: Pre-migration backup failed. Legacy /attendance was preserved.`,
-      adminUid: verifiedAdmin.uid,
-      migratedCount: 0,
-      skippedDuplicateCount: 0,
-      unregisteredCount: 0,
-      verifiedCount: 0,
-      totalLegacyCount: 0,
-      legacyRemoved: false,
-      failedOperation: opErr?.operation || 'BACKUP',
-      failedPath: opErr?.path || '/backups',
-      errors: [msg],
-      recordLogs,
-    };
-  }
+  emitProgress({ phase: 'inspecting', message: 'Reading /students, /attendance, and checkpoint state in parallel...' });
 
-  // 3. Read /students explicitly (no silent null fallback)
+  // 2. Parallel reads of /students, /rfid_to_student, /attendance, /students_attendance, and existing checkpoint
   let rawStudents: Record<string, any> = {};
-  try {
-    const studentsSnap = await runRtdbOp('GET', '/students', () =>
-      withTimeoutReject(get(ref(db, 'students')), 6000, 'Timed out reading /students')
-    );
-    rawStudents = studentsSnap.exists() ? studentsSnap.val() : {};
-  } catch (err: any) {
-    const opErr = err instanceof RtdbOperationError ? err : null;
-    const msg = err?.message || 'Failed reading /students';
-    return {
-      success: false,
-      message: `Migration aborted reading /students. Legacy /attendance was preserved.`,
-      adminUid: verifiedAdmin.uid,
-      backupPath,
-      backupVerifiedCount,
-      backupExpectedCount,
-      migratedCount: 0,
-      skippedDuplicateCount: 0,
-      unregisteredCount: 0,
-      verifiedCount: 0,
-      totalLegacyCount: 0,
-      legacyRemoved: false,
-      failedOperation: opErr?.operation || 'GET',
-      failedPath: opErr?.path || '/students',
-      errors: [msg],
-      recordLogs,
-    };
-  }
-
-  const studentRegistry: Record<string, Student> = {};
-  const rfidToDbKey: Record<string, string> = {};
-
-  for (const [rawKey, rawStu] of Object.entries(rawStudents)) {
-    if (!rawStu || typeof rawStu !== 'object') continue;
-    const dbKey = rawKey.trim();
-    const cardRfid = normalizeRfidKey(rawStu.rfidUID || rawStu.uid || dbKey);
-    const existing = studentRegistry[dbKey];
-    const mergedAttendance: Record<string, AttendanceRecord> = {
-      ...(existing?.attendance || {}),
-      ...(rawStu.attendance || {}),
-    };
-    studentRegistry[dbKey] = stripUndefinedDeep({
-      ...(existing || {}),
-      ...rawStu,
-      studentDbId: dbKey,
-      rfidUID: cardRfid,
-      uid: cardRfid,
-      ...(Object.keys(mergedAttendance).length > 0 ? { attendance: mergedAttendance } : {}),
-    });
-    rfidToDbKey[cardRfid] = dbKey;
-  }
-
-  // Also read /rfid_to_student index so reassigned RFID cards route legacy records to the right student
-  try {
-    const idxSnap = await withTimeout(get(ref(db, 'rfid_to_student')), 2500, null);
-    if (idxSnap && idxSnap.exists && idxSnap.exists()) {
-      const idxVal = idxSnap.val() as Record<string, any>;
-      Object.entries(idxVal || {}).forEach(([rfidKey, mapping]) => {
-        const targetDbId = typeof mapping === 'string' ? mapping : mapping?.studentDbId;
-        if (targetDbId && studentRegistry[targetDbId]) {
-          rfidToDbKey[normalizeRfidKey(rfidKey)] = targetDbId;
-        }
-      });
-    }
-  } catch {}
-
-  // 4. Read all legacy records from /attendance (explicitly, no silent timeout suppression)
-  let hasRootAttendance = false;
   let legacyAtt: Record<string, Record<string, any>> = {};
+  let legacyStuAtt: Record<string, Record<string, any>> = {};
+  let rfidIndexVal: Record<string, any> = {};
+  let existingCheckpoint: MigrationCheckpoint | null = null;
+  let hasRootAttendance = false;
+  let hasLegacyStudentsAttendance = false;
+
   try {
-    const attSnap = await runRtdbOp('GET', '/attendance', () =>
-      withTimeoutReject(get(ref(db, 'attendance')), 6000, 'Timed out reading /attendance')
-    );
+    const [studentsSnap, attSnap, saSnap, idxSnap, cpSnap] = await Promise.all([
+      runRtdbOp('GET', '/students', () =>
+        withTimeoutReject(get(ref(db, 'students')), 7000, 'Timed out reading /students')
+      ),
+      runRtdbOp('GET', '/attendance', () =>
+        withTimeoutReject(get(ref(db, 'attendance')), 7000, 'Timed out reading /attendance')
+      ),
+      withTimeout(get(ref(db, 'students_attendance')), 3500, null).catch(() => null),
+      withTimeout(get(ref(db, 'rfid_to_student')), 3000, null).catch(() => null),
+      withTimeout(get(ref(db, MIGRATION_CHECKPOINT_PATH)), 2500, null).catch(() => null),
+    ]);
+
+    rawStudents = studentsSnap.exists() ? studentsSnap.val() : {};
     hasRootAttendance = attSnap.exists();
-    if (hasRootAttendance) {
-      legacyAtt = attSnap.val() || {};
+    if (hasRootAttendance) legacyAtt = attSnap.val() || {};
+    if (saSnap && saSnap.exists && saSnap.exists()) {
+      hasLegacyStudentsAttendance = true;
+      legacyStuAtt = saSnap.val() || {};
+    }
+    if (idxSnap && idxSnap.exists && idxSnap.exists()) {
+      rfidIndexVal = idxSnap.val() || {};
+    }
+    if (cpSnap && cpSnap.exists && cpSnap.exists()) {
+      existingCheckpoint = cpSnap.val() as MigrationCheckpoint;
     }
   } catch (err: any) {
     const opErr = err instanceof RtdbOperationError ? err : null;
-    const msg = err?.message || 'Failed reading /attendance';
+    const msg = err?.message || 'Failed reading database sources';
+    emitProgress({ status: 'error', phase: 'error', verificationStatus: 'failed', message: msg });
     return {
       success: false,
-      message: `Migration aborted reading /attendance. Legacy /attendance was preserved.`,
+      message: `Migration aborted: ${msg}. Legacy /attendance was preserved.`,
       adminUid: verifiedAdmin.uid,
-      backupPath,
-      backupVerifiedCount,
-      backupExpectedCount,
       migratedCount: 0,
       skippedDuplicateCount: 0,
       unregisteredCount: 0,
       verifiedCount: 0,
+      failedCount: 0,
       totalLegacyCount: 0,
       legacyRemoved: false,
+      durationMs: Date.now() - startedAt,
       failedOperation: opErr?.operation || 'GET',
       failedPath: opErr?.path || '/attendance',
       errors: [msg],
@@ -4261,25 +5112,48 @@ async function executeUnifiedDatabaseMigrationInternal(
     };
   }
 
-  let hasLegacyStudentsAttendance = false;
-  let legacyStuAtt: Record<string, Record<string, any>> = {};
-  try {
-    const saSnap = await withTimeout(get(ref(db, 'students_attendance')), 3500, null);
-    if (saSnap && saSnap.exists && saSnap.exists()) {
-      hasLegacyStudentsAttendance = true;
-      legacyStuAtt = saSnap.val() || {};
+  // Build normalized O(1) lookup indices for student matching (eliminates O(N^2) linear .find()!)
+  const studentRegistry: Record<string, Student> = {};
+  const rfidToDbKey: Record<string, string> = {};
+  const rollToStudent: Record<string, Student> = {};
+  const authToStudentObj: Record<string, Student> = {};
+  const emailToStudent: Record<string, Student> = {};
+  const nameToStudent: Record<string, Student> = {};
+
+  for (const [rawKey, rawStu] of Object.entries(rawStudents)) {
+    if (!rawStu || typeof rawStu !== 'object') continue;
+    const dbKey = rawKey.trim();
+    const cardRfid = normalizeRfidKey(rawStu.rfidUID || rawStu.uid || dbKey);
+    const normalizedStu: Student = stripUndefinedDeep({
+      ...rawStu,
+      studentDbId: dbKey,
+      rfidUID: cardRfid,
+      uid: cardRfid,
+    });
+    studentRegistry[dbKey] = normalizedStu;
+    rfidToDbKey[cardRfid] = dbKey;
+    if (normalizedStu.studentId) rollToStudent[normalizedStu.studentId.trim().toUpperCase()] = normalizedStu;
+    if (normalizedStu.authUid) authToStudentObj[normalizedStu.authUid.trim()] = normalizedStu;
+    if (normalizedStu.email) emailToStudent[normalizedStu.email.trim().toLowerCase()] = normalizedStu;
+    if (normalizedStu.name) nameToStudent[normalizedStu.name.trim().toLowerCase()] = normalizedStu;
+  }
+
+  Object.entries(rfidIndexVal).forEach(([rfidKey, mapping]) => {
+    const targetDbId = typeof mapping === 'string' ? mapping : mapping?.studentDbId;
+    if (targetDbId && studentRegistry[targetDbId]) {
+      rfidToDbKey[normalizeRfidKey(rfidKey)] = targetDbId;
     }
-  } catch {}
+  });
 
-  const legacyPairs = new Map<string, { date: string; rawUid: string; normUid: string; rawRec: any }>();
-
+  // Collect deduplicated legacy attendance entries
+  const legacyPairs = new Map<string, { key: string; date: string; rawUid: string; normUid: string; rawRec: any }>();
   Object.entries(legacyAtt).forEach(([dateKey, dayMap]) => {
     if (!dayMap || typeof dayMap !== 'object') return;
     Object.entries(dayMap).forEach(([uidKey, rawRec]) => {
       if (!rawRec || typeof rawRec !== 'object') return;
       const normUid = normalizeRfidKey(rawRec.rfidUID || rawRec.uid || uidKey);
       const key = `${dateKey}::${normUid}`;
-      legacyPairs.set(key, { date: dateKey, rawUid: uidKey, normUid, rawRec });
+      legacyPairs.set(key, { key, date: dateKey, rawUid: uidKey, normUid, rawRec });
     });
   });
 
@@ -4290,238 +5164,579 @@ async function executeUnifiedDatabaseMigrationInternal(
       const normUid = normalizeRfidKey(rawRec.rfidUID || rawRec.uid || uidKey);
       const key = `${dateKey}::${normUid}`;
       if (!legacyPairs.has(key)) {
-        legacyPairs.set(key, { date: dateKey, rawUid: uidKey, normUid, rawRec });
+        legacyPairs.set(key, { key, date: dateKey, rawUid: uidKey, normUid, rawRec });
       }
     });
   });
 
   const totalLegacyCount = legacyPairs.size;
   if (totalLegacyCount === 0) {
+    emitProgress({
+      status: 'completed',
+      phase: 'completed',
+      totalLegacy: 0,
+      verificationStatus: 'verified',
+      message: 'No pending legacy records detected.',
+    });
     return {
       success: true,
-      message: `No legacy records found in /attendance. Verified backup created at ${backupPath}.`,
+      message: 'No legacy records found in /attendance. Database is already 100% unified.',
       adminUid: verifiedAdmin.uid,
-      backupPath,
-      backupVerifiedCount,
-      backupExpectedCount,
       migratedCount: 0,
       skippedDuplicateCount: 0,
+      alreadyMigratedCount: 0,
       unregisteredCount: 0,
       verifiedCount: 0,
+      failedCount: 0,
       totalLegacyCount: 0,
       legacyRemoved: !hasRootAttendance,
+      durationMs: Date.now() - startedAt,
       errors: [],
       recordLogs,
     };
   }
 
-  let migratedCount = 0;
-  let skippedDuplicateCount = 0;
-  let unregisteredCount = 0;
+  // 3. Mandatory pre-migration backup under /backups (reuse verified checkpoint backup on resume)
+  let backupPath = '';
+  let rawBackupPath = '';
+  let backupVerifiedCount = 0;
+  let backupExpectedCount = totalLegacyCount;
+
+  const canReuseCheckpointBackup =
+    options?.resume &&
+    existingCheckpoint?.backupPath &&
+    existingCheckpoint.backupExpectedCount === totalLegacyCount &&
+    existingCheckpoint.backupVerifiedCount === totalLegacyCount;
+
+  if (canReuseCheckpointBackup && existingCheckpoint?.backupPath) {
+    backupPath = existingCheckpoint.backupPath;
+    rawBackupPath = backupPath.replace(/^\//, '');
+    backupVerifiedCount = existingCheckpoint.backupVerifiedCount || totalLegacyCount;
+    backupExpectedCount = existingCheckpoint.backupExpectedCount || totalLegacyCount;
+  } else {
+    emitProgress({
+      phase: 'backing_up',
+      totalLegacy: totalLegacyCount,
+      message: `Creating verified pre-migration snapshot of ${totalLegacyCount} legacy records in /backups...`,
+    });
+    try {
+      const backup = await exportCompleteDatabaseBackup({
+        email: verifiedAdmin.email || adminUser?.email,
+        uid: verifiedAdmin.uid,
+      });
+      backupPath = backup.backupPath;
+      rawBackupPath = backup.rawBackupPath;
+      backupVerifiedCount = backup.verifiedRecordCount;
+      backupExpectedCount = backup.expectedRecordCount;
+    } catch (err: any) {
+      const opErr = err instanceof RtdbOperationError ? err : null;
+      const msg = err?.message || 'Backup write failed';
+      emitProgress({ status: 'error', phase: 'error', verificationStatus: 'failed', message: msg });
+      return {
+        success: false,
+        message: 'Migration aborted: Pre-migration backup failed. Legacy /attendance was preserved.',
+        adminUid: verifiedAdmin.uid,
+        migratedCount: 0,
+        skippedDuplicateCount: 0,
+        unregisteredCount: 0,
+        verifiedCount: 0,
+        failedCount: 0,
+        totalLegacyCount,
+        legacyRemoved: false,
+        durationMs: Date.now() - startedAt,
+        failedOperation: opErr?.operation || 'BACKUP',
+        failedPath: opErr?.path || '/backups',
+        errors: [msg],
+        recordLogs,
+      };
+    }
+  }
+
+  // 4. Compute Incremental Delta Queue (skip already migrated & checkpointed items)
+  const completedKeysMap: Record<string, string> =
+    options?.resume && existingCheckpoint?.completedKeys ? { ...existingCheckpoint.completedKeys } : {};
+  const failedItemsSet = new Set<string>(
+    options?.retryFailedOnly && existingCheckpoint?.failedItems
+      ? existingCheckpoint.failedItems.map((f) => f.key)
+      : []
+  );
+
+  interface WorkItem {
+    key: string;
+    date: string;
+    normUid: string;
+    kind: 'student' | 'recovery';
+    targetDbId?: string;
+    targetUid: string;
+    destSubPath: string; // relative to /students or /migration_recovery/unregistered_attendance
+    fullPath: string; // e.g. students/{id}/attendance/{date}
+    payload: AttendanceRecord;
+    isMerge: boolean;
+  }
+
+  const workQueue: WorkItem[] = [];
+  const discoveredDates = new Set<string>();
+  const failedItems: MigrationFailedItem[] = [];
+  let alreadyMigratedCount = 0;
   let firstFailedOperation: string | undefined;
   let firstFailedPath: string | undefined;
 
-  const expectedTargets: Array<{ targetPath: string; date: string; uid: string; studentDbId?: string; status: string }> = [];
-
-  // 5. Migrate each record dynamically to /students/{studentDbId}/attendance/{DATE}
   for (const entry of legacyPairs.values()) {
-    const { date, normUid, rawRec } = entry;
+    const { key, date, normUid, rawRec } = entry;
+    if (options?.retryFailedOnly && failedItemsSet.size > 0 && !failedItemsSet.has(key)) {
+      alreadyMigratedCount++;
+      continue;
+    }
 
-    let targetStudent: Student | undefined =
+    // Check O(1) indices
+    const targetStudent: Student | undefined =
       (rawRec.studentDbId && studentRegistry[rawRec.studentDbId]) ||
       (rfidToDbKey[normUid] && studentRegistry[rfidToDbKey[normUid]]) ||
-      studentRegistry[normUid];
+      studentRegistry[normUid] ||
+      (rawRec.studentId && rollToStudent[rawRec.studentId.toString().trim().toUpperCase()]) ||
+      (rawRec.authUid && authToStudentObj[rawRec.authUid.trim()]) ||
+      (rawRec.email && emailToStudent[rawRec.email.toString().trim().toLowerCase()]) ||
+      ((rawRec.studentName || rawRec.name) && nameToStudent[(rawRec.studentName || rawRec.name).toString().trim().toLowerCase()]);
 
-    if (!targetStudent && rawRec.studentId) {
-      const targetStuId = rawRec.studentId.toString().trim().toUpperCase();
-      targetStudent = Object.values(studentRegistry).find(
-        (s) => s.studentId?.trim().toUpperCase() === targetStuId
-      );
-    }
-    if (!targetStudent && rawRec.authUid) {
-      targetStudent = Object.values(studentRegistry).find(
-        (s) => s.authUid === rawRec.authUid
-      );
-    }
-    if (!targetStudent && rawRec.email) {
-      const targetEmail = rawRec.email.toString().trim().toLowerCase();
-      targetStudent = Object.values(studentRegistry).find(
-        (s) => s.email?.trim().toLowerCase() === targetEmail
-      );
-    }
-    if (!targetStudent && (rawRec.studentName || rawRec.name)) {
-      const targetName = (rawRec.studentName || rawRec.name).toString().trim().toLowerCase();
-      targetStudent = Object.values(studentRegistry).find(
-        (s) => s.name?.trim().toLowerCase() === targetName
-      );
-    }
-
-    try {
-      if (targetStudent) {
-        const targetDbId = (targetStudent.studentDbId || normUid).trim();
-        const targetUid = normalizeRfidKey(targetStudent.rfidUID || targetStudent.uid || normUid);
-        const destPath = `students/${targetDbId}/attendance/${date}`;
-        const existingAtTarget = targetStudent.attendance?.[date];
-        const normalizedRec = stripUndefinedDeep(
-          normalizeAttendanceRecord(
-            {
-              ...rawRec,
-              studentDbId: targetDbId,
-              uid: targetUid,
-              studentUID: targetUid,
-              rfidUID: targetUid,
-              studentRfid: targetUid,
-              studentName: rawRec.studentName || rawRec.name || targetStudent.name,
-              studentId: rawRec.studentId || targetStudent.studentId,
-              department: rawRec.department || targetStudent.department,
-              authUid: rawRec.authUid || targetStudent.authUid || '',
-              source: rawRec.source || 'migration',
-              date: rawRec.date || date,
-            },
-            date,
-            targetUid,
-            targetDbId
-          )
-        );
-
-        const validationErr = validateAttendancePayload(normalizedRec);
-        if (validationErr) {
-          if (!firstFailedOperation) {
-            firstFailedOperation = 'VALIDATE_PAYLOAD';
-            firstFailedPath = `/${destPath}`;
-          }
-          errors.push(`/${destPath}: ${validationErr}`);
-          recordLogs.push({ uid: targetUid, date, targetPath: `/${destPath}`, action: 'failed', message: validationErr });
-          continue;
-        }
-
-        if (existingAtTarget) {
-          const merged = stripUndefinedDeep(mergeAttendanceEntries(existingAtTarget, normalizedRec));
-          await runRtdbOp('SET', `/${destPath}`, () => set(ref(db, destPath), merged));
-          skippedDuplicateCount++;
-          recordLogs.push({
+    if (targetStudent) {
+      const targetDbId = (targetStudent.studentDbId || normUid).trim();
+      const targetUid = normalizeRfidKey(targetStudent.rfidUID || targetStudent.uid || normUid);
+      const destPath = `students/${targetDbId}/attendance/${date}`;
+      const existingAtTarget = targetStudent.attendance?.[date];
+      const normalizedRec = stripUndefinedDeep(
+        normalizeAttendanceRecord(
+          {
+            ...rawRec,
+            studentDbId: targetDbId,
             uid: targetUid,
-            date,
-            targetPath: `/${destPath}`,
-            action: 'merged',
-            message: 'Duplicate avoided; merged with existing unified record',
-          });
-          expectedTargets.push({ targetPath: destPath, date, uid: targetUid, studentDbId: targetDbId, status: merged.status });
-        } else {
-          await runRtdbOp('SET', `/${destPath}`, () => set(ref(db, destPath), normalizedRec));
-          migratedCount++;
-          recordLogs.push({
-            uid: targetUid,
-            date,
-            targetPath: `/${destPath}`,
-            action: 'migrated',
-            message: `Preserved ${normalizedRec.time} (${normalizedRec.status})`,
-          });
-          expectedTargets.push({ targetPath: destPath, date, uid: targetUid, studentDbId: targetDbId, status: normalizedRec.status });
-        }
-      } else {
-        const recPath = `migration_recovery/unregistered_attendance/${normUid}/${date}`;
-        const normalizedUnreg = stripUndefinedDeep(
-          normalizeAttendanceRecord(
-            {
-              ...rawRec,
-              uid: normUid,
-              rfidUID: normUid,
-              date: rawRec.date || date,
-            },
-            date,
-            normUid
-          )
-        );
-        await runRtdbOp('SET', `/${recPath}`, () => set(ref(db, recPath), normalizedUnreg));
-        unregisteredCount++;
-        expectedTargets.push({ targetPath: recPath, date, uid: normUid, status: normalizedUnreg.status });
-        recordLogs.push({
-          uid: normUid,
+            studentUID: targetUid,
+            rfidUID: targetUid,
+            studentRfid: targetUid,
+            studentName: rawRec.studentName || rawRec.name || targetStudent.name,
+            studentId: rawRec.studentId || targetStudent.studentId,
+            department: rawRec.department || targetStudent.department,
+            authUid: rawRec.authUid || targetStudent.authUid || '',
+            source: rawRec.source || 'migration',
+            date: rawRec.date || date,
+          },
           date,
-          targetPath: `/${recPath}`,
-          action: 'recovery',
-          message: 'Unregistered RFID archived safely in recovery vault',
+          targetUid,
+          targetDbId
+        )
+      );
+
+      const validationErr = validateAttendancePayload(normalizedRec);
+      if (validationErr) {
+        if (!firstFailedOperation) {
+          firstFailedOperation = 'VALIDATE_PAYLOAD';
+          firstFailedPath = `/${destPath}`;
+        }
+        errors.push(`/${destPath}: ${validationErr}`);
+        failedItems.push({ key, date, uid: targetUid, targetPath: `/${destPath}`, error: validationErr });
+        pushLog({ uid: targetUid, date, targetPath: `/${destPath}`, action: 'failed', message: validationErr });
+        continue;
+      }
+
+      // Skip already migrated/identical/newer destination records without redundant write
+      if (completedKeysMap[key] && existingAtTarget) {
+        alreadyMigratedCount++;
+        discoveredDates.add(date);
+        continue;
+      }
+
+      if (existingAtTarget && isTargetAttendanceAlreadyUpToDate(existingAtTarget, normalizedRec)) {
+        alreadyMigratedCount++;
+        completedKeysMap[key] = destPath;
+        discoveredDates.add(date);
+        pushLog({
+          uid: targetUid,
+          date,
+          targetPath: `/${destPath}`,
+          action: 'merged',
+          message: 'Already unified & verified in destination (skipped write)',
         });
+        continue;
       }
-    } catch (recErr: any) {
-      const opErr = recErr instanceof RtdbOperationError ? recErr : null;
-      const errMsg = recErr?.message || 'Write failed';
-      const failPath = opErr?.path || `/students/${normUid}/attendance/${date}`;
-      if (!firstFailedOperation) {
-        firstFailedOperation = opErr?.operation || 'SET';
-        firstFailedPath = failPath;
-      }
-      errors.push(errMsg);
-      recordLogs.push({
-        uid: normUid,
+
+      const finalPayload = existingAtTarget
+        ? stripUndefinedDeep(mergeAttendanceEntries(existingAtTarget, normalizedRec))
+        : normalizedRec;
+
+      workQueue.push({
+        key,
         date,
-        targetPath: failPath,
-        action: 'failed',
-        message: errMsg,
+        normUid,
+        kind: 'student',
+        targetDbId,
+        targetUid,
+        destSubPath: `${targetDbId}/attendance/${date}`,
+        fullPath: destPath,
+        payload: finalPayload,
+        isMerge: Boolean(existingAtTarget),
+      });
+    } else {
+      const recPath = `migration_recovery/unregistered_attendance/${normUid}/${date}`;
+      if (completedKeysMap[key]) {
+        alreadyMigratedCount++;
+        continue;
+      }
+      const normalizedUnreg = stripUndefinedDeep(
+        normalizeAttendanceRecord(
+          {
+            ...rawRec,
+            uid: normUid,
+            rfidUID: normUid,
+            date: rawRec.date || date,
+          },
+          date,
+          normUid
+        )
+      );
+      workQueue.push({
+        key,
+        date,
+        normUid,
+        kind: 'recovery',
+        targetUid: normUid,
+        destSubPath: `${normUid}/${date}`,
+        fullPath: recPath,
+        payload: normalizedUnreg,
+        isMerge: false,
       });
     }
   }
 
-  // 6. Verify EVERY migrated record via read-back parity check
-  let verifiedCount = 0;
-  for (const target of expectedTargets) {
+  let currentBatchSize = configuredBatchSize;
+  const estimatedBatches = workQueue.length > 0 ? Math.ceil(workQueue.length / currentBatchSize) : 0;
+
+  emitProgress({
+    phase: workQueue.length > 0 ? 'migrating_batch' : 'cleaning_legacy',
+    totalLegacy: totalLegacyCount,
+    alreadyMigrated: alreadyMigratedCount,
+    pending: workQueue.length,
+    succeeded: 0,
+    failed: failedItems.length,
+    unregistered: 0,
+    currentBatch: 0,
+    totalBatches: estimatedBatches,
+    backupPath,
+    verificationStatus: workQueue.length > 0 ? 'pending' : 'verified',
+    message:
+      workQueue.length > 0
+        ? `Migrating ${workQueue.length} pending record(s) in batches of ${currentBatchSize} (${alreadyMigratedCount} already unified)...`
+        : `All ${alreadyMigratedCount} records already unified; verifying legacy cleanup...`,
+  });
+
+  let migratedCount = 0;
+  let skippedDuplicateCount = alreadyMigratedCount;
+  let unregisteredCount = 0;
+  let verifiedCount = alreadyMigratedCount;
+  let lastCheckpointAt: number | undefined = existingCheckpoint?.lastCheckpointAt;
+  let paused = false;
+
+  const saveCheckpoint = async (
+    status: MigrationCheckpoint['status'],
+    currentBatch: number,
+    totalBatches: number
+  ) => {
+    lastCheckpointAt = Date.now();
+    // Guard RTDB node size: cap completedKeys persisted in checkpoint at 5,000 keys
+    const keyEntries = Object.entries(completedKeysMap);
+    const boundedCompletedKeys =
+      keyEntries.length <= 5000
+        ? completedKeysMap
+        : Object.fromEntries(keyEntries.slice(keyEntries.length - 5000));
+
+    const checkpointPayload: MigrationCheckpoint = stripUndefinedDeep({
+      version: 'unified_students_v2_batched',
+      status,
+      backupPath,
+      backupVerifiedCount,
+      backupExpectedCount,
+      totalLegacyCount,
+      processedCount: verifiedCount,
+      migratedCount,
+      skippedCount: skippedDuplicateCount,
+      unregisteredCount,
+      verifiedCount,
+      failedCount: failedItems.length,
+      currentBatch,
+      totalBatches,
+      batchSize: currentBatchSize,
+      completedKeys: boundedCompletedKeys,
+      failedItems: failedItems.slice(0, 200),
+      startedAt,
+      lastCheckpointAt,
+      ...(status === 'completed' ? { completedAt: lastCheckpointAt } : {}),
+    });
+
     try {
-      const checkSnap = await runRtdbOp('GET (Verify Migrated)', `/${target.targetPath}`, () =>
-        withTimeoutReject(
-          get(ref(db, target.targetPath)),
-          5000,
-          `Verification read timed out at /${target.targetPath}`
-        )
-      );
-      if (checkSnap.exists()) {
+      await withTimeout(set(ref(db, MIGRATION_CHECKPOINT_PATH), checkpointPayload), 2500, null);
+    } catch {}
+  };
+
+  // 5. Execute Batched Multi-Location Writes (strictly scoped under /students & /migration_recovery)
+  //    followed by Batch-Scoped Parity Verification + Persistent Checkpoints!
+  let cursor = 0;
+  let batchNum = 0;
+
+  while (cursor < workQueue.length) {
+    if (migrationControl.pauseRequested) {
+      paused = true;
+      await saveCheckpoint('paused', batchNum, Math.max(batchNum, estimatedBatches));
+      emitProgress({
+        status: 'paused',
+        phase: 'paused',
+        pending: Math.max(0, workQueue.length - cursor),
+        lastCheckpointAt,
+        verificationStatus: 'partial',
+        message: `Migration paused at batch ${batchNum}. ${verifiedCount}/${totalLegacyCount} processed & saved in checkpoint.`,
+      });
+      break;
+    }
+
+    batchNum++;
+    const slice = workQueue.slice(cursor, cursor + currentBatchSize);
+    const remainingTotalBatches = batchNum + Math.ceil((workQueue.length - (cursor + slice.length)) / currentBatchSize);
+
+    emitProgress({
+      phase: 'migrating_batch',
+      currentBatch: batchNum,
+      totalBatches: remainingTotalBatches,
+      pending: workQueue.length - cursor,
+      message: `Writing batch ${batchNum}/${remainingTotalBatches} (${slice.length} records)...`,
+    });
+
+    const studentBatchUpdates: Record<string, any> = {};
+    const recoveryBatchUpdates: Record<string, any> = {};
+    const studentSlice: WorkItem[] = [];
+    const recoverySlice: WorkItem[] = [];
+
+    for (const item of slice) {
+      if (item.kind === 'student') {
+        studentBatchUpdates[item.destSubPath] = item.payload;
+        studentSlice.push(item);
+        discoveredDates.add(item.date);
+      } else {
+        recoveryBatchUpdates[item.destSubPath] = item.payload;
+        recoverySlice.push(item);
+      }
+    }
+
+    let batchWriteOk = true;
+    try {
+      if (studentSlice.length > 0) {
+        await runRtdbOp('UPDATE (Batch /students)', '/students', () =>
+          withRetryBackoff(() => update(ref(db, 'students'), stripUndefinedDeep(studentBatchUpdates)))
+        );
+      }
+      if (recoverySlice.length > 0) {
+        await runRtdbOp('UPDATE (Batch /migration_recovery)', '/migration_recovery/unregistered_attendance', () =>
+          withRetryBackoff(() =>
+            update(ref(db, 'migration_recovery/unregistered_attendance'), stripUndefinedDeep(recoveryBatchUpdates))
+          )
+        );
+      }
+    } catch (batchErr: any) {
+      batchWriteOk = false;
+      const opErr = batchErr instanceof RtdbOperationError ? batchErr : null;
+
+      // Adaptive batch downgrade on transient/payload failure if batch > 25
+      if (currentBatchSize > 25 && isTransientFirebaseError(batchErr)) {
+        currentBatchSize = Math.max(25, Math.floor(currentBatchSize / 2));
+        batchNum--;
+        continue;
+      }
+
+      // Fallback per-item within failed slice so healthy records still commit & bad records are isolated
+      for (const item of slice) {
+        try {
+          await runRtdbOp('SET', `/${item.fullPath}`, () => set(ref(db, item.fullPath), item.payload));
+        } catch (singleErr: any) {
+          const sOpErr = singleErr instanceof RtdbOperationError ? singleErr : opErr;
+          const msg = singleErr?.message || 'Batch write failed';
+          if (!firstFailedOperation) {
+            firstFailedOperation = sOpErr?.operation || 'SET';
+            firstFailedPath = sOpErr?.path || `/${item.fullPath}`;
+          }
+          errors.push(msg);
+          failedItems.push({
+            key: item.key,
+            date: item.date,
+            uid: item.targetUid,
+            targetPath: `/${item.fullPath}`,
+            error: msg,
+          });
+          pushLog({
+            uid: item.targetUid,
+            date: item.date,
+            targetPath: `/${item.fullPath}`,
+            action: 'failed',
+            message: msg,
+          });
+        }
+      }
+    }
+
+    // Verify ONLY the current batch (concurrent bounded verification read-backs)
+    emitProgress({
+      phase: 'verifying_batch',
+      currentBatch: batchNum,
+      totalBatches: remainingTotalBatches,
+      verificationStatus: 'verifying',
+      message: `Verifying batch ${batchNum}/${remainingTotalBatches} (${slice.length} records)...`,
+    });
+
+    const itemsToVerify = batchWriteOk
+      ? slice
+      : slice.filter((it) => !failedItems.some((f) => f.key === it.key));
+
+    await runWithConcurrency(itemsToVerify, 16, async (item) => {
+      try {
+        const checkSnap = await withRetryBackoff(() =>
+          runRtdbOp('GET (Verify Batch)', `/${item.fullPath}`, () =>
+            withTimeoutReject(
+              get(ref(db, item.fullPath)),
+              5000,
+              `Verification timed out at /${item.fullPath}`
+            )
+          )
+        );
+        if (!checkSnap.exists()) {
+          throw new Error(`Missing verified record at /${item.fullPath}`);
+        }
         const val = checkSnap.val() || {};
         const storedUid = normalizeRfidKey(val.uid || val.rfidUID || '');
         const storedDbId = (val.studentDbId || '').toString().trim();
         const idMatches =
-          storedUid === target.uid ||
-          (target.studentDbId && storedDbId === target.studentDbId);
+          storedUid === item.targetUid ||
+          (item.targetDbId && storedDbId === item.targetDbId);
         const hasValidFields =
-          val.date === target.date &&
+          val.date === item.date &&
           idMatches &&
           Boolean(val.status) &&
           Boolean(val.time) &&
           typeof val.timestamp === 'number' &&
           val.timestamp > 0;
-        if (hasValidFields) {
-          verifiedCount++;
+
+        if (!hasValidFields) {
+          throw new Error(`Parity mismatch at /${item.fullPath} (uid=${storedUid}, date=${val.date || 'missing'})`);
+        }
+
+        verifiedCount++;
+        completedKeysMap[item.key] = item.fullPath;
+
+        if (item.kind === 'recovery') {
+          unregisteredCount++;
+          pushLog({
+            uid: item.targetUid,
+            date: item.date,
+            targetPath: `/${item.fullPath}`,
+            action: 'recovery',
+            message: 'Archived & verified in recovery vault',
+          });
+        } else if (item.isMerge) {
+          skippedDuplicateCount++;
+          pushLog({
+            uid: item.targetUid,
+            date: item.date,
+            targetPath: `/${item.fullPath}`,
+            action: 'merged',
+            message: 'Merged & verified without duplicate overwrite',
+          });
         } else {
-          if (!firstFailedOperation) {
-            firstFailedOperation = 'VERIFY_PARITY';
-            firstFailedPath = `/${target.targetPath}`;
-          }
-          errors.push(`Parity mismatch at /${target.targetPath} (stored uid=${storedUid}, date=${val.date || 'missing'})`);
+          migratedCount++;
+          pushLog({
+            uid: item.targetUid,
+            date: item.date,
+            targetPath: `/${item.fullPath}`,
+            action: 'migrated',
+            message: `Verified ${item.payload.time} (${item.payload.status})`,
+          });
         }
-      } else {
+      } catch (verifyErr: any) {
+        const opErr = verifyErr instanceof RtdbOperationError ? verifyErr : null;
+        const msg = verifyErr?.message || `Verification error at /${item.fullPath}`;
         if (!firstFailedOperation) {
-          firstFailedOperation = 'VERIFY_EXISTS';
-          firstFailedPath = `/${target.targetPath}`;
+          firstFailedOperation = opErr?.operation || 'VERIFY_PARITY';
+          firstFailedPath = opErr?.path || `/${item.fullPath}`;
         }
-        errors.push(`Missing verified record at /${target.targetPath}`);
+        errors.push(msg);
+        failedItems.push({
+          key: item.key,
+          date: item.date,
+          uid: item.targetUid,
+          targetPath: `/${item.fullPath}`,
+          error: msg,
+        });
+        pushLog({
+          uid: item.targetUid,
+          date: item.date,
+          targetPath: `/${item.fullPath}`,
+          action: 'failed',
+          message: msg,
+        });
       }
-    } catch (verifyErr: any) {
-      const opErr = verifyErr instanceof RtdbOperationError ? verifyErr : null;
-      if (!firstFailedOperation) {
-        firstFailedOperation = opErr?.operation || 'GET (Verify Migrated)';
-        firstFailedPath = opErr?.path || `/${target.targetPath}`;
-      }
-      errors.push(verifyErr?.message || `Verification error at /${target.targetPath}`);
-    }
+    });
+
+    cursor += slice.length;
+    await saveCheckpoint('running', batchNum, remainingTotalBatches);
+
+    emitProgress({
+      phase: 'verifying_batch',
+      alreadyMigrated: alreadyMigratedCount,
+      pending: Math.max(0, workQueue.length - cursor),
+      succeeded: migratedCount + Math.max(0, skippedDuplicateCount - alreadyMigratedCount),
+      failed: failedItems.length,
+      unregistered: unregisteredCount,
+      currentBatch: batchNum,
+      totalBatches: remainingTotalBatches,
+      lastCheckpointAt,
+      verificationStatus: failedItems.length > 0 ? 'partial' : 'verified',
+      message: `Checkpoint saved after batch ${batchNum}/${remainingTotalBatches} (${verifiedCount}/${totalLegacyCount} verified).`,
+    });
   }
 
-  const isVerified =
-    verifiedCount === totalLegacyCount &&
-    verifiedCount === expectedTargets.length &&
-    errors.length === 0;
+  if (paused) {
+    const durationMs = Math.max(1, Date.now() - startedAt);
+    const recordsPerSec = Number((((migratedCount + unregisteredCount) / durationMs) * 1000).toFixed(1));
+    return {
+      success: false,
+      paused: true,
+      message: `Migration paused after checkpoint (${verifiedCount}/${totalLegacyCount} verified). Legacy /attendance preserved so you can resume anytime.`,
+      adminUid: verifiedAdmin.uid,
+      backupPath,
+      backupVerifiedCount,
+      backupExpectedCount,
+      migratedCount,
+      skippedDuplicateCount,
+      alreadyMigratedCount,
+      unregisteredCount,
+      verifiedCount,
+      failedCount: failedItems.length,
+      totalLegacyCount,
+      legacyRemoved: false,
+      durationMs,
+      recordsPerSec,
+      lastCheckpointAt,
+      errors,
+      recordLogs,
+    };
+  }
+
+  const isVerified = verifiedCount === totalLegacyCount && failedItems.length === 0 && errors.length === 0;
   let legacyRemoved = false;
 
-  // 7. Preserve legacy /attendance until 100% verification passes
+  // 6. Sync newly migrated dates into working_days in a single batch and clean legacy ONLY on 100% parity
+  if (discoveredDates.size > 0) {
+    syncWorkingDaysFromDates(Array.from(discoveredDates)).catch(() => {});
+  }
+
   if (isVerified) {
+    emitProgress({
+      phase: 'cleaning_legacy',
+      message: '100% parity confirmed. Cleaning legacy /attendance node...',
+    });
     if (hasRootAttendance) {
       try {
         await runRtdbOp('REMOVE', '/attendance', () => remove(ref(db, 'attendance')));
@@ -4542,60 +5757,178 @@ async function executeUnifiedDatabaseMigrationInternal(
     if (hasLegacyStudentsAttendance) {
       try {
         await runRtdbOp('REMOVE', '/students_attendance', () => remove(ref(db, 'students_attendance')));
-      } catch {
-        // Non-blocking legacy auxiliary cleanup
-      }
+      } catch {}
     }
 
-    // Record verification summary strictly inside the authorized /backups node
     if (rawBackupPath) {
       try {
-        await runRtdbOp('UPDATE', `${backupPath}/migrationVerification`, () =>
-          update(ref(db, rawBackupPath), {
-            migrationVerification: {
-              completedAt: Date.now(),
-              completedAtIst: getISTTimestampDisplay(),
-              completedBy: verifiedAdmin.email || 'admin',
-              completedByUid: verifiedAdmin.uid,
-              migratedCount,
-              skippedDuplicateCount,
-              unregisteredCount,
-              verifiedCount,
-              totalLegacyCount,
-              legacyRemoved,
-            },
-          })
-        );
-      } catch {
-        // Non-blocking metadata update on verified backup
-      }
+        await update(ref(db, rawBackupPath), {
+          migrationVerification: {
+            completedAt: Date.now(),
+            completedAtIst: getISTTimestampDisplay(),
+            completedBy: verifiedAdmin.email || 'admin',
+            completedByUid: verifiedAdmin.uid,
+            migratedCount,
+            skippedDuplicateCount,
+            alreadyMigratedCount,
+            unregisteredCount,
+            verifiedCount,
+            totalLegacyCount,
+            legacyRemoved,
+          },
+        });
+      } catch {}
     }
+
+    await saveCheckpoint('completed', batchNum, Math.max(1, batchNum));
+  } else {
+    await saveCheckpoint('error', batchNum, Math.max(1, batchNum));
   }
 
+  const durationMs = Math.max(1, Date.now() - startedAt);
+  const studentSucceededInSession = migratedCount + Math.max(0, skippedDuplicateCount - alreadyMigratedCount);
+  const processedInSession = studentSucceededInSession + unregisteredCount;
+  const recordsPerSec = Number(((processedInSession / durationMs) * 1000).toFixed(1));
   const overallSuccess = isVerified && legacyRemoved && errors.length === 0;
+
+  emitProgress({
+    status: overallSuccess ? 'completed' : 'error',
+    phase: overallSuccess ? 'completed' : 'error',
+    pending: failedItems.length,
+    succeeded: studentSucceededInSession,
+    failed: failedItems.length,
+    unregistered: unregisteredCount,
+    lastCheckpointAt,
+    verificationStatus: overallSuccess ? 'verified' : failedItems.length > 0 ? 'partial' : 'failed',
+    message: overallSuccess
+      ? `Migration verified (${verifiedCount}/${totalLegacyCount} confirmed, ${recordsPerSec} rec/sec).`
+      : `Migration incomplete (${verifiedCount}/${totalLegacyCount} verified, ${failedItems.length} failed). Legacy preserved.`,
+  });
 
   return {
     success: overallSuccess,
+    paused: false,
     message: overallSuccess
-      ? `Migration verified (${verifiedCount}/${totalLegacyCount} records confirmed). Backup verified at ${backupPath} and legacy /attendance removed.`
+      ? `Migration verified (${verifiedCount}/${totalLegacyCount} records confirmed in ${(durationMs / 1000).toFixed(2)}s @ ${recordsPerSec} rec/sec). Backup verified at ${backupPath} and legacy /attendance removed.`
       : isVerified && !legacyRemoved
       ? `All ${verifiedCount}/${totalLegacyCount} records migrated & verified, but legacy /attendance cleanup failed. Legacy records remain preserved.`
-      : `Migration failed or verification incomplete (${verifiedCount}/${totalLegacyCount} verified). Legacy /attendance was preserved.`,
+      : `Migration incomplete (${verifiedCount}/${totalLegacyCount} verified, ${failedItems.length} failed). Legacy /attendance was preserved.`,
     adminUid: verifiedAdmin.uid,
     backupPath,
     backupVerifiedCount,
     backupExpectedCount,
     migratedCount,
     skippedDuplicateCount,
+    alreadyMigratedCount,
     unregisteredCount,
     verifiedCount,
+    failedCount: failedItems.length,
     totalLegacyCount,
     legacyRemoved,
+    durationMs,
+    recordsPerSec,
+    lastCheckpointAt,
     failedOperation: overallSuccess ? undefined : firstFailedOperation,
     failedPath: overallSuccess ? undefined : firstFailedPath,
     errors,
     recordLogs,
   };
+}
+
+/**
+ * Pure + verifiable Dashboard aggregate calculator with consistency verification.
+ * Used both for fast incremental KPI computation and rebuild/verification audits.
+ */
+export function computeDashboardAggregates(params: {
+  studentsMap: Record<string, Student>;
+  workingDays: Record<string, WorkingDayConfig>;
+  todayStr: string;
+  isAfterDeadline: boolean;
+}): DashboardAggregates {
+  const { studentsMap, workingDays, todayStr, isAfterDeadline } = params;
+  const isTodayHoliday = Boolean(workingDays[todayStr]?.isHoliday);
+
+  let totalActiveStudents = 0;
+  let presentToday = 0;
+  let explicitAbsentToday = 0;
+  let totalHistoricalRecords = 0;
+  const workingDateSet = new Set<string>();
+
+  Object.entries(workingDays || {}).forEach(([d, cfg]) => {
+    if (d && d <= todayStr && cfg && !cfg.isHoliday) {
+      workingDateSet.add(d);
+    }
+  });
+
+  Object.values(studentsMap || {}).forEach((st) => {
+    if (!st) return;
+    const isActive =
+      st.status === 'active' &&
+      !st.isSuspended &&
+      !(st.activeSuspension && st.activeSuspension.status === 'active');
+    if (isActive) totalActiveStudents++;
+
+    if (st.attendance && typeof st.attendance === 'object') {
+      Object.entries(st.attendance).forEach(([d, rec]) => {
+        if (!rec || rec.isDeleted) return;
+        totalHistoricalRecords++;
+        if (d <= todayStr && !workingDays[d]?.isHoliday) {
+          workingDateSet.add(d);
+        }
+        if (d === todayStr && isActive) {
+          if (rec.status === 'Present') presentToday++;
+          else if (rec.status === 'Absent') explicitAbsentToday++;
+        }
+      });
+    }
+  });
+
+  const unscannedActive = Math.max(0, totalActiveStudents - presentToday - explicitAbsentToday);
+  const pendingToday = isTodayHoliday || isAfterDeadline ? 0 : unscannedActive;
+  const absentToday = isTodayHoliday
+    ? explicitAbsentToday
+    : isAfterDeadline
+    ? explicitAbsentToday + unscannedActive
+    : explicitAbsentToday;
+  const attendanceRate = totalActiveStudents > 0 ? Math.round((presentToday / totalActiveStudents) * 100) : 0;
+
+  return {
+    updatedAt: Date.now(),
+    todayStr,
+    totalActiveStudents,
+    presentToday,
+    explicitAbsentToday,
+    pendingToday,
+    absentToday,
+    attendanceRate,
+    totalHistoricalRecords,
+    verifiedWorkingDays: workingDateSet.size,
+  };
+}
+
+/**
+ * Rebuilds and persists verified dashboard aggregates under /settings/aggregates (admin-writable)
+ * for instant cold-start checks & consistency verification.
+ */
+export async function rebuildAndVerifyAggregates(
+  studentsMap: Record<string, Student>,
+  workingDays: Record<string, WorkingDayConfig>,
+  todayStr: string,
+  isAfterDeadline: boolean
+): Promise<DashboardAggregates> {
+  const agg = computeDashboardAggregates({
+    studentsMap,
+    workingDays,
+    todayStr,
+    isAfterDeadline,
+  });
+  try {
+    const db = getFirebaseDatabase();
+    await withTimeout(set(ref(db, 'settings/aggregates'), stripUndefinedDeep(agg)), 2500, null);
+  } catch {
+    // Non-blocking cache persistence
+  }
+  return agg;
 }
 
 export function subscribeToMigrationRecovery(
